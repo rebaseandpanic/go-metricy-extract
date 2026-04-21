@@ -6,9 +6,27 @@ CLI tool that extracts Prometheus metric metadata from Go source code via static
 
 ## Installation
 
+### Via Go (recommended if you have Go installed)
+
 ```bash
 go install github.com/rebaseandpanic/go-metricy-extract/cmd/go-metricy-extract@latest
 ```
+
+### Via prebuilt binary (no Go toolchain required)
+
+Download the archive for your platform from the [Releases page](https://github.com/rebaseandpanic/go-metricy-extract/releases/latest):
+
+- Linux: `go-metricy-extract_Linux_x86_64.tar.gz` / `..._arm64.tar.gz`
+- macOS: `go-metricy-extract_Darwin_x86_64.tar.gz` / `..._arm64.tar.gz`
+- Windows: `go-metricy-extract_Windows_x86_64.zip`
+
+```bash
+# Linux amd64 example:
+curl -L https://github.com/rebaseandpanic/go-metricy-extract/releases/latest/download/go-metricy-extract_Linux_x86_64.tar.gz | tar xz
+./go-metricy-extract --source ./myservice
+```
+
+Checksums in `checksums.txt` alongside the archives; signatures by GitHub Actions OIDC.
 
 ## Usage
 

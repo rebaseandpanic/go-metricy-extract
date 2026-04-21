@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-04-21
+
+- [FEATURE] Prebuilt binaries published via GoReleaser + GitHub Actions on every tag. Platforms: Linux (amd64/arm64), macOS (amd64/arm64), Windows (amd64). SHA256 checksums included. Users without a Go toolchain can now install by downloading and extracting the archive
+- [FEATURE] `version` string is now set at build time from the Git tag via `-X main.version={{ .Version }}` ldflags; `go-metricy-extract --help` shows the actual release version instead of `"dev"` for tagged builds
+- [UX] Installation section in README gains a "prebuilt binary" alternative alongside the existing `go install` path
+
 ## [0.3.1] - 2026-04-21
 
 **BREAKING CHANGE:** Exit code taxonomy split — tool crashes and validation
