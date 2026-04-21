@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-04-21
+
+- [FEATURE] Extractor now resolves `promauto.With(registry).NewX(...)` chained form; previously silently skipped. All 8 metric factories × both direct and chained receivers now extract identically
+- [FEATURE] Extractor resolves single-level local `var labels = []string{...}` references as the labels argument of Vec constructors. Supports package-level vars in the same file; multi-name pairwise specs work. Function-local, alias-typed (`type MyLabels []string`), two-level chains (`var b = a`), and cross-file/package vars remain fallback (warning + no labels)
+- [FEATURE] Validation report schema bumped to "1.1" (additive): new `generated_at` ISO-8601 timestamp field and `by_rule[]` array with per-rule violation counts (rule_id, severity, error_count, warning_count). Existing consumers that ignore unknown JSON keys continue to work unchanged
+- [UX] Multi-line `@metric description` / `@metric calculation` / `@label` continuation lines now emit a warning ("possible multi-line continuation after <directive>; only the first line is captured") instead of silently dropping the continuation. Blank lines reset the tracker, so mixed prose + directives stay warning-free
+- [UX] Normalized leading `///` in doc comments — triple-slash lines treated as blank, no false-positive continuation warnings
+- [ARCHITECTURE] `model.ExtractedAtLayout` exported for reuse across snapshot and validation report timestamps (single source of truth for `"2006-01-02T15:04:05Z"`)
+- [ARCHITECTURE] `validation.WriteReport(w, res, now)` now takes a clock function for deterministic `generated_at` timestamps in tests; nil clock falls back to `time.Now`
+- [BUGFIX] Sample service fixture canary metric (`chained_promauto_canary_total`) now demonstrates the supported `promauto.With(...)` form and appears in the snapshot; previously pinned as silently skipped
+
 ## [0.2.0] - 2026-04-21
 
 - [FEATURE] Eight new validation rules bringing total to 15: four naming/convention checks (`metric.counter-total-suffix`, `metric.histogram-unit-suffix`, `metric.name-snake-case`, `metric.non-literal-metadata`), three min-length checks (`metric.description-min-length`, `metric.calculation-min-length`, `metric.label-description-min-length`), and one off-by-default high-cardinality hint (`metric.label-high-cardinality-hint`)

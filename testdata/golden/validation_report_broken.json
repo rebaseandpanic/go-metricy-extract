@@ -1,5 +1,6 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
+  "generated_at": "2026-04-20T10:00:00Z",
   "violations": [
     {
       "rule_id": "metric.calculation-min-length",
@@ -69,5 +70,43 @@
     }
   ],
   "error_count": 4,
-  "warning_count": 2
+  "warning_count": 2,
+  "by_rule": [
+    {
+      "rule_id": "metric.calculation-min-length",
+      "severity": "warning",
+      "error_count": 0,
+      "warning_count": 1
+    },
+    {
+      "rule_id": "metric.calculation-required",
+      "severity": "error",
+      "error_count": 1,
+      "warning_count": 0
+    },
+    {
+      "rule_id": "metric.counter-total-suffix",
+      "severity": "warning",
+      "error_count": 0,
+      "warning_count": 1
+    },
+    {
+      "rule_id": "metric.description-required",
+      "severity": "error",
+      "error_count": 1,
+      "warning_count": 0
+    },
+    {
+      "rule_id": "metric.duplicate-name",
+      "severity": "error",
+      "error_count": 1,
+      "warning_count": 0
+    },
+    {
+      "rule_id": "metric.type-consistency",
+      "severity": "error",
+      "error_count": 1,
+      "warning_count": 0
+    }
+  ]
 }

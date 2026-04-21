@@ -389,13 +389,15 @@ var X = promauto.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "y"}, []s
 			},
 		},
 		{
-			name: "promauto.With(reg).NewCounter is skipped silently (deferred)",
+			name: "promauto.With(reg).NewCounter is extracted",
 			src: `package p
 import "github.com/prometheus/client_golang/prometheus/promauto"
 var reg = newRegistry()
 var X = promauto.With(reg).NewCounter(prometheus.CounterOpts{Name: "x", Help: "y"})
 `,
-			wantMetrics:  nil,
+			wantMetrics: []model.MetricDescriptor{
+				{Name: "x", Type: "counter", Help: "y"},
+			},
 			wantWarnings: 0,
 		},
 		{
@@ -423,16 +425,23 @@ var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "y"}, [
 			wantWarnings: 1,
 		},
 		{
-			name: "Vec with labels passed as variable emits metric without labels + warning",
+			// v0.3.0-C: single-level AST resolution of local `var labels =
+			// []string{...}`. What was previously a warning is now a resolved
+			// extraction. See the "local var" cases below for the full
+			// happy/negative matrix.
+			name: "Vec with labels passed as local var is resolved to literal",
 			src: `package p
 import "github.com/prometheus/client_golang/prometheus"
 var lbls = []string{"a", "b"}
 var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "y"}, lbls)
 `,
 			wantMetrics: []model.MetricDescriptor{
-				{Name: "x", Type: "counter", Help: "y"},
+				{Name: "x", Type: "counter", Help: "y", Labels: []model.LabelDescriptor{
+					{Name: "a"},
+					{Name: "b"},
+				}},
 			},
-			wantWarnings: 1,
+			wantWarnings: 0,
 		},
 		{
 			name: "Vec with all non-literal labels emits metric without labels + warning",
@@ -519,13 +528,228 @@ var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "y"}, [
 			},
 			wantWarnings: 1,
 		},
-		// ---- MUST: promauto.With(reg).NewCounterVec silent skip ----
+		// ---- v0.3.0-A: promauto.With(reg) chained form is extracted ----
 		{
-			name: "promauto.With(reg).NewCounterVec is skipped silently (deferred)",
+			name: "promauto.With(reg).NewCounterVec is extracted with labels",
 			src: `package p
 import "github.com/prometheus/client_golang/prometheus/promauto"
 var reg = newRegistry()
 var X = promauto.With(reg).NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "y"}, []string{"l"})
+`,
+			wantMetrics: []model.MetricDescriptor{
+				{Name: "x", Type: "counter", Help: "y", Labels: []model.LabelDescriptor{
+					{Name: "l"},
+				}},
+			},
+			wantWarnings: 0,
+		},
+		{
+			name: "promauto.With(reg).NewGauge is extracted",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus/promauto"
+var reg = newRegistry()
+var X = promauto.With(reg).NewGauge(prometheus.GaugeOpts{Name: "x", Help: "y"})
+`,
+			wantMetrics: []model.MetricDescriptor{
+				{Name: "x", Type: "gauge", Help: "y"},
+			},
+		},
+		{
+			name: "promauto.With(reg).NewHistogram is extracted",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus/promauto"
+var reg = newRegistry()
+var X = promauto.With(reg).NewHistogram(prometheus.HistogramOpts{Name: "x", Help: "y"})
+`,
+			wantMetrics: []model.MetricDescriptor{
+				{Name: "x", Type: "histogram", Help: "y"},
+			},
+		},
+		{
+			name: "promauto.With(reg).NewSummary is extracted",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus/promauto"
+var reg = newRegistry()
+var X = promauto.With(reg).NewSummary(prometheus.SummaryOpts{Name: "x", Help: "y"})
+`,
+			wantMetrics: []model.MetricDescriptor{
+				{Name: "x", Type: "summary", Help: "y"},
+			},
+		},
+		{
+			name: "promauto.With(reg).NewGaugeVec is extracted with labels",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus/promauto"
+var reg = newRegistry()
+var X = promauto.With(reg).NewGaugeVec(prometheus.GaugeOpts{Name: "x", Help: "y"}, []string{"l"})
+`,
+			wantMetrics: []model.MetricDescriptor{
+				{Name: "x", Type: "gauge", Help: "y", Labels: []model.LabelDescriptor{
+					{Name: "l"},
+				}},
+			},
+		},
+		{
+			name: "promauto.With(reg).NewHistogramVec is extracted with labels",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus/promauto"
+var reg = newRegistry()
+var X = promauto.With(reg).NewHistogramVec(prometheus.HistogramOpts{Name: "x", Help: "y"}, []string{"l"})
+`,
+			wantMetrics: []model.MetricDescriptor{
+				{Name: "x", Type: "histogram", Help: "y", Labels: []model.LabelDescriptor{
+					{Name: "l"},
+				}},
+			},
+		},
+		{
+			name: "promauto.With(reg).NewSummaryVec is extracted with labels",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus/promauto"
+var reg = newRegistry()
+var X = promauto.With(reg).NewSummaryVec(prometheus.SummaryOpts{Name: "x", Help: "y"}, []string{"l"})
+`,
+			wantMetrics: []model.MetricDescriptor{
+				{Name: "x", Type: "summary", Help: "y", Labels: []model.LabelDescriptor{
+					{Name: "l"},
+				}},
+			},
+		},
+		{
+			name: "promauto.With(NewRegistry()) — call expr as registry arg",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+import "github.com/prometheus/client_golang/prometheus/promauto"
+var X = promauto.With(prometheus.NewRegistry()).NewCounter(prometheus.CounterOpts{Name: "x", Help: "y"})
+`,
+			wantMetrics: []model.MetricDescriptor{
+				{Name: "x", Type: "counter", Help: "y"},
+			},
+		},
+		{
+			name: "promauto.With(pkg.Registry) — selector expr as registry arg",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus/promauto"
+var X = promauto.With(pkg.Registry).NewCounter(prometheus.CounterOpts{Name: "x", Help: "y"})
+`,
+			wantMetrics: []model.MetricDescriptor{
+				{Name: "x", Type: "counter", Help: "y"},
+			},
+		},
+		{
+			name: "promauto.With(reg).NewCounterVec — carries varName in source location",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus/promauto"
+var reg = newRegistry()
+// @metric description Chained counter with labels.
+// @label l the single label
+var Chained = promauto.With(reg).NewCounterVec(prometheus.CounterOpts{Name: "c_total", Help: "h"}, []string{"l"})
+`,
+			wantMetrics: []model.MetricDescriptor{
+				{
+					Name:        "c_total",
+					Type:        "counter",
+					Help:        "h",
+					Description: strPtr("Chained counter with labels."),
+					Labels: []model.LabelDescriptor{
+						{Name: "l", Description: strPtr("the single label")},
+					},
+				},
+			},
+		},
+		// ---- v0.3.0-A review: chained-form annotations, warnings, negative cases ----
+		{
+			name: "promauto.With(reg).NewCounter — carries Description and Calculation annotations",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus/promauto"
+import "github.com/prometheus/client_golang/prometheus"
+var reg = prometheus.NewRegistry()
+// Chained is a chained counter with full annotations.
+//
+// @metric description Chained counter with description annotation.
+// @metric calculation Incremented in some chained pipeline.
+var Chained = promauto.With(reg).NewCounter(prometheus.CounterOpts{Name: "chained", Help: "h"})
+`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "chained", Type: "counter", Help: "h",
+				Description: strPtr("Chained counter with description annotation."),
+				Calculation: strPtr("Incremented in some chained pipeline."),
+			}},
+			wantWarnings: 0,
+		},
+		{
+			name: "promauto.With(reg).NewCounter with non-literal Name — warning prefixed by varName",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus/promauto"
+import "github.com/prometheus/client_golang/prometheus"
+var reg = prometheus.NewRegistry()
+var runtimeName = "computed_at_runtime"
+var X = promauto.With(reg).NewCounter(prometheus.CounterOpts{Name: runtimeName, Help: "h"})
+`,
+			wantMetrics:  nil,
+			wantWarnings: 1, // non-literal Name на chained form
+		},
+		{
+			name: "promauto.Build(reg).NewCounter — inner selector not 'With', skipped",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus/promauto"
+import "github.com/prometheus/client_golang/prometheus"
+var reg = prometheus.NewRegistry()
+var X = promauto.Build(reg).NewCounter(prometheus.CounterOpts{Name: "x", Help: "h"})
+`,
+			wantMetrics:  nil,
+			wantWarnings: 0,
+		},
+		{
+			name: "promauto.With() with zero args — still accepted (arg count not validated)",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus/promauto"
+import "github.com/prometheus/client_golang/prometheus"
+var X = promauto.With().NewCounter(prometheus.CounterOpts{Name: "x", Help: "h"})
+`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "x", Type: "counter", Help: "h", Labels: nil,
+			}},
+			wantWarnings: 0,
+		},
+		// ---- Negative chained-form cases: stay silently skipped ----
+		{
+			name: "prometheus.With(reg).NewCounter — With is not defined on prometheus, skipped",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var reg = newRegistry()
+var X = prometheus.With(reg).NewCounter(prometheus.CounterOpts{Name: "x", Help: "y"})
+`,
+			wantMetrics:  nil,
+			wantWarnings: 0,
+		},
+		{
+			name: "promauto.With(a).With(b).NewCounter — double-chained, skipped",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus/promauto"
+var a = newRegistry()
+var b = newRegistry()
+var X = promauto.With(a).With(b).NewCounter(prometheus.CounterOpts{Name: "x", Help: "y"})
+`,
+			wantMetrics:  nil,
+			wantWarnings: 0,
+		},
+		{
+			name: "someHelper(reg).NewCounter — non-promauto helper, skipped",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var reg = newRegistry()
+var X = someHelper(reg).NewCounter(prometheus.CounterOpts{Name: "x", Help: "y"})
+`,
+			wantMetrics:  nil,
+			wantWarnings: 0,
+		},
+		{
+			name: "pkg.Helper(reg).NewCounter — selector-call helper, skipped",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var reg = newRegistry()
+var X = pkg.Helper(reg).NewCounter(prometheus.CounterOpts{Name: "x", Help: "y"})
 `,
 			wantMetrics:  nil,
 			wantWarnings: 0,
@@ -700,6 +924,235 @@ var (
 				}},
 			},
 		},
+		// ---- v0.3.0-C: single-level AST resolution of local label slice vars ----
+		{
+			name: "local var []string{...} resolved for Vec labels",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var commonLabels = []string{"method", "status"}
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "h"}, commonLabels)
+`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "x", Type: "counter", Help: "h",
+				Labels: []model.LabelDescriptor{{Name: "method"}, {Name: "status"}},
+			}},
+			wantWarnings: 0,
+		},
+		{
+			name: "local var []string{} resolved — empty-labels warning preserved",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var noLabels = []string{}
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "h"}, noLabels)
+`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "x", Type: "counter", Help: "h", Labels: nil,
+			}},
+			wantWarnings: 1, // empty-labels warning fires on resolved literal too
+		},
+		{
+			name: "local var labels not found — fallback warning",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "h"}, missingVar)
+`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "x", Type: "counter", Help: "h", Labels: nil,
+			}},
+			wantWarnings: 1,
+		},
+		{
+			name: "local var of non-slice type — not resolved, fallback warning",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var wrongType = 42
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "h"}, wrongType)
+`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "x", Type: "counter", Help: "h", Labels: nil,
+			}},
+			wantWarnings: 1,
+		},
+		{
+			name: "local var with non-literal element partially resolved with warning",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var other = "method"
+var mixedLabels = []string{"a", other, "c"}
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "h"}, mixedLabels)
+`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "x", Type: "counter", Help: "h",
+				Labels: []model.LabelDescriptor{{Name: "a"}, {Name: "c"}},
+			}},
+			wantWarnings: 1, // non-literal element warning
+		},
+		{
+			name: "multi-name var spec — pairwise local-var label resolution",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var labelsA, labelsB = []string{"x"}, []string{"y", "z"}
+var A = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "a", Help: "h"}, labelsA)
+var B = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "b", Help: "h"}, labelsB)
+`,
+			wantMetrics: []model.MetricDescriptor{
+				{Name: "a", Type: "counter", Help: "h", Labels: []model.LabelDescriptor{{Name: "x"}}},
+				{Name: "b", Type: "counter", Help: "h", Labels: []model.LabelDescriptor{{Name: "y"}, {Name: "z"}}},
+			},
+			wantWarnings: 0,
+		},
+		{
+			name: "two-level chain NOT resolved — fallback warning (single-level only)",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var firstRef = []string{"a"}
+var secondRef = firstRef
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "h"}, secondRef)
+`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "x", Type: "counter", Help: "h", Labels: nil,
+			}},
+			wantWarnings: 1, // secondRef resolves to an *ast.Ident, not a CompositeLit
+		},
+		{
+			name: "package-qualified labels variable not resolved — fallback warning",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+import "other/pkg"
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "h"}, pkg.Labels)
+`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "x", Type: "counter", Help: "h", Labels: nil,
+			}},
+			wantWarnings: 1,
+		},
+		{
+			name: "local var without value (only type) — not resolved, fallback warning",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var emptyDecl []string
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "h"}, emptyDecl)
+`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "x", Type: "counter", Help: "h", Labels: nil,
+			}},
+			wantWarnings: 1,
+		},
+		{
+			name: "local var labels resolved for promauto.With(reg).NewCounterVec",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+import "github.com/prometheus/client_golang/prometheus/promauto"
+var reg = prometheus.NewRegistry()
+var shared = []string{"code"}
+var X = promauto.With(reg).NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "h"}, shared)
+`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "x", Type: "counter", Help: "h",
+				Labels: []model.LabelDescriptor{{Name: "code"}},
+			}},
+			wantWarnings: 0,
+		},
+		{
+			name: "@label descriptions bind to labels from resolved local var",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var commonLabels = []string{"method", "status"}
+// Metric with annotations and labels via local var.
+//
+// @metric description Total HTTP requests.
+// @metric calculation Incremented per response.
+// @label method HTTP method used
+// @label status response status code
+var HttpReqs = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "http_reqs_total", Help: "h"}, commonLabels)`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "http_reqs_total", Type: "counter", Help: "h",
+				Description: strPtr("Total HTTP requests."),
+				Calculation: strPtr("Incremented per response."),
+				Labels: []model.LabelDescriptor{
+					{Name: "method", Description: strPtr("HTTP method used")},
+					{Name: "status", Description: strPtr("response status code")},
+				},
+			}},
+			wantWarnings: 0,
+		},
+		{
+			name: "local var declared AFTER metric — still resolved (file order irrelevant)",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "h"}, laterLabels)
+var laterLabels = []string{"l1", "l2"}`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "x", Type: "counter", Help: "h",
+				Labels: []model.LabelDescriptor{{Name: "l1"}, {Name: "l2"}},
+			}},
+			wantWarnings: 0,
+		},
+		{
+			name: "metric inside var(...) block, labels-var top-level — resolved",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var groupLabels = []string{"region"}
+var (
+    M = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "m", Help: "h"}, groupLabels)
+)`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "m", Type: "counter", Help: "h",
+				Labels: []model.LabelDescriptor{{Name: "region"}},
+			}},
+			wantWarnings: 0,
+		},
+		{
+			name: "var = function call — not resolved, fallback warning",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+func makeLabels() []string { return []string{"a","b"} }
+var dynamic = makeLabels()
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "h"}, dynamic)`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "x", Type: "counter", Help: "h", Labels: nil,
+			}},
+			wantWarnings: 1, // fallback "not a []string{...} literal"
+		},
+		{
+			name: "two Vecs share one labels var — both resolve identically",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+var shared = []string{"code"}
+var A = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "a", Help: "h"}, shared)
+var B = prometheus.NewGaugeVec(prometheus.GaugeOpts{Name: "b", Help: "h"}, shared)`,
+			wantMetrics: []model.MetricDescriptor{
+				{Name: "a", Type: "counter", Help: "h", Labels: []model.LabelDescriptor{{Name: "code"}}},
+				{Name: "b", Type: "gauge", Help: "h", Labels: []model.LabelDescriptor{{Name: "code"}}},
+			},
+			wantWarnings: 0,
+		},
+		{
+			name: "function-local labels var — not resolved (top-level only)",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+func init() {
+    var localVar = []string{"inside"}
+    _ = localVar
+}
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "h"}, localVar)`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "x", Type: "counter", Help: "h", Labels: nil,
+			}},
+			wantWarnings: 1, // localVar not declared at top-level → fallback
+		},
+		{
+			name: "aliased []string type — not resolved, fallback warning",
+			src: `package p
+import "github.com/prometheus/client_golang/prometheus"
+type MyLabels []string
+var aliased = MyLabels{"a", "b"}
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "h"}, aliased)`,
+			wantMetrics: []model.MetricDescriptor{{
+				Name: "x", Type: "counter", Help: "h", Labels: nil,
+			}},
+			wantWarnings: 1,
+		},
 	}
 
 	fset := token.NewFileSet()
@@ -793,11 +1246,13 @@ var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "y"})
 `,
 		},
 		{
-			name: "labels passed as variable",
+			// Unresolvable identifier — not declared as a top-level var in
+			// this file, so the single-level resolver (v0.3.0-C) returns
+			// nil and the not-a-literal warning fires.
+			name: "labels passed as unresolvable variable",
 			src: `package p
 import "github.com/prometheus/client_golang/prometheus"
-var lbls = []string{"a"}
-var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "y"}, lbls)
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x", Help: "y"}, missingVar)
 `,
 		},
 		{
@@ -1468,6 +1923,36 @@ var X = prometheus.NewCounter(prometheus.CounterOpts{Name: "x", Help: "y"})
 		}
 		if res.Metrics[0].SourceLocation != nil {
 			t.Errorf("want nil SourceLocation for empty filename, got %+v", res.Metrics[0].SourceLocation)
+		}
+	})
+
+	t.Run("SourceLocationForChainedPromautoWith", func(t *testing.T) {
+		src := `package p
+import "github.com/prometheus/client_golang/prometheus/promauto"
+import "github.com/prometheus/client_golang/prometheus"
+var reg = prometheus.NewRegistry()
+var X = promauto.With(reg).NewCounter(prometheus.CounterOpts{Name: "x", Help: "h"})`
+
+		fset := token.NewFileSet()
+		res, err := ExtractSourceWithOptions(fset, "chain.go", src, ExtractOptions{})
+		if err != nil {
+			t.Fatalf("extract: %v", err)
+		}
+		if len(res.Metrics) != 1 {
+			t.Fatalf("want 1 metric, got %d", len(res.Metrics))
+		}
+		sl := res.Metrics[0].SourceLocation
+		if sl == nil {
+			t.Fatalf("SourceLocation nil on chained form")
+		}
+		if sl.File != "chain.go" {
+			t.Errorf("File: got %q, want chain.go", sl.File)
+		}
+		if sl.Line == nil || *sl.Line != 5 {
+			t.Errorf("Line: got %v, want 5", sl.Line)
+		}
+		if sl.Member == nil || *sl.Member != "X" {
+			t.Errorf("Member: got %v, want X", sl.Member)
 		}
 	})
 

@@ -135,9 +135,86 @@ func TestSwagStyleParser_Parse(t *testing.T) {
 			wantWarnings: 0,
 		},
 		{
-			name: "multi-line description NOT supported: continuation line ignored",
+			name: "multi-line description NOT supported: continuation line warns",
 			doc: `@metric description foo
 bar baz`,
+			wantAnn: Annotations{
+				Description: strPtr("foo"),
+			},
+			wantWarnings: 1,
+		},
+		{
+			name: "continuation after @metric calculation warns",
+			doc: `@metric calculation Incremented
+in RequestLoggingMiddleware.`,
+			wantAnn: Annotations{
+				Calculation: strPtr("Incremented"),
+			},
+			wantWarnings: 1,
+		},
+		{
+			name: "continuation after @label warns",
+			doc: `@label method HTTP method
+used by the handler.`,
+			wantAnn: Annotations{
+				Labels: map[string]string{"method": "HTTP method"},
+			},
+			wantWarnings: 1,
+		},
+		{
+			name: "blank line separates paragraphs — no continuation warning",
+			doc: `@metric description Total requests
+
+Plain godoc prose after blank line.`,
+			wantAnn: Annotations{
+				Description: strPtr("Total requests"),
+			},
+			wantWarnings: 0,
+		},
+		{
+			name: "plain text before directive — no continuation warning",
+			doc: `Package-level prose.
+@metric description Total requests`,
+			wantAnn: Annotations{
+				Description: strPtr("Total requests"),
+			},
+			wantWarnings: 0,
+		},
+		{
+			name: "multi-line paragraph after directive — single warning, not cascade",
+			doc: `@metric description foo
+bar
+baz`,
+			wantAnn: Annotations{
+				Description: strPtr("foo"),
+			},
+			wantWarnings: 1,
+		},
+		{
+			name: "continuation then new directive — warning emitted, new directive processed",
+			doc: `@metric description foo
+wrong continuation
+@metric calculation bar`,
+			wantAnn: Annotations{
+				Description: strPtr("foo"),
+				Calculation: strPtr("bar"),
+			},
+			wantWarnings: 1,
+		},
+		{
+			name: "no warning when directive is last non-blank line",
+			doc: `@metric description foo
+`,
+			wantAnn: Annotations{
+				Description: strPtr("foo"),
+			},
+			wantWarnings: 0,
+		},
+		{
+			name: "non-our @-directive does not trigger continuation",
+			doc: `@metric description foo
+@api something
+continuation of @api should not warn`,
 			wantAnn: Annotations{
 				Description: strPtr("foo"),
 			},
@@ -213,6 +290,39 @@ bar baz`,
 			wantWarnings: 0,
 		},
 		{
+			name: "two paragraphs after two directives — one warning per paragraph",
+			doc: `@metric description first para
+continuation of first
+@metric calculation second para
+continuation of second`,
+			wantAnn: Annotations{
+				Description: strPtr("first para"),
+				Calculation: strPtr("second para"),
+			},
+			wantWarnings: 2, // one per continuation
+		},
+		{
+			name: "duplicate directive keeps tracker — continuation after duplicate fires",
+			doc: `@metric description first
+@metric description second
+continuation after dup`,
+			wantAnn: Annotations{
+				Description: strPtr("second"),
+			},
+			wantWarnings: 2, // one "duplicate @metric description", one "continuation"
+		},
+		{
+			name: "triple-slash line after directive — treated as blank, no continuation warning",
+			doc: `@metric description foo
+///
+@metric calculation bar`,
+			wantAnn: Annotations{
+				Description: strPtr("foo"),
+				Calculation: strPtr("bar"),
+			},
+			wantWarnings: 0, // /// normalizes to empty, blank-line reset
+		},
+		{
 			name: "directives separated by plain text and blank lines",
 			doc: `@metric description foo
 
@@ -269,4 +379,39 @@ func TestSwagStyleParser_Parse_DuplicateDescriptionWarningContent(t *testing.T) 
 // SwagStyleParser satisfies the AnnotationParser interface.
 func TestSwagStyleParser_Parse_InterfaceSatisfied(t *testing.T) {
 	var _ AnnotationParser = SwagStyleParser{}
+}
+
+// TestSwagStyleParser_Parse_ContinuationWarningContent asserts the continuation
+// warning text mentions the likely cause so authors can diagnose why only the
+// first line of their description was captured.
+func TestSwagStyleParser_Parse_ContinuationWarningContent(t *testing.T) {
+	p := SwagStyleParser{}
+	doc := `@metric description foo
+bar baz`
+	_, warns := p.Parse(doc)
+	if len(warns) != 1 {
+		t.Fatalf("want 1 warning, got %d: %v", len(warns), warns)
+	}
+	if !strings.Contains(warns[0], "possible multi-line continuation") {
+		t.Errorf("warning should mention 'possible multi-line continuation'; got %q", warns[0])
+	}
+	if !strings.Contains(warns[0], "@metric description") {
+		t.Errorf("warning should mention the offending directive '@metric description'; got %q", warns[0])
+	}
+}
+
+// TestSwagStyleParser_Parse_ContinuationWarningMentionsLabel asserts the
+// warning names the specific @label directive (including label name) so an
+// author can find which label's description was truncated.
+func TestSwagStyleParser_Parse_ContinuationWarningMentionsLabel(t *testing.T) {
+	p := SwagStyleParser{}
+	doc := `@label method HTTP verb
+wrapped to second line`
+	_, warns := p.Parse(doc)
+	if len(warns) != 1 {
+		t.Fatalf("want 1 warning, got %d: %v", len(warns), warns)
+	}
+	if !strings.Contains(warns[0], "@label method") {
+		t.Errorf("warning should mention the offending directive '@label method'; got %q", warns[0])
+	}
 }

@@ -32,10 +32,10 @@ type MetricSnapshot struct {
 	ExtractionWarnings []string `json:"-"`
 }
 
-// extractedAtLayout is the wire format for MetricSnapshot.ExtractedAt.
-// Second-precision ISO-8601 UTC; golden-file tests and consumer diffs
-// depend on it staying stable.
-const extractedAtLayout = "2006-01-02T15:04:05Z"
+// ExtractedAtLayout is the wire format for MetricSnapshot.ExtractedAt
+// and validation report GeneratedAt timestamps. Second-precision ISO-8601
+// UTC; golden-file tests and consumer diffs depend on it staying stable.
+const ExtractedAtLayout = "2006-01-02T15:04:05Z"
 
 // MarshalJSON normalizes nil Metrics to an empty array and pins
 // ExtractedAt to second-precision ISO-8601 UTC (default time.Time
@@ -55,7 +55,7 @@ func (s MetricSnapshot) MarshalJSON() ([]byte, error) {
 	}{
 		SchemaVersion: s.SchemaVersion,
 		Project:       s.Project,
-		ExtractedAt:   s.ExtractedAt.UTC().Format(extractedAtLayout),
+		ExtractedAt:   s.ExtractedAt.UTC().Format(ExtractedAtLayout),
 		Extractor:     s.Extractor,
 		Metrics:       metrics,
 	})

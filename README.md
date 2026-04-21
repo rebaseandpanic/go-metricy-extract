@@ -102,7 +102,7 @@ Three directives, each on its own line inside a doc comment attached to the metr
 
 Conventions — influenced by [`swaggo/swag`](https://github.com/swaggo/swag), which uses the same `@verb key value` style in Go doc comments:
 
-- One directive per line. Multi-line values are not supported — continuation lines are silently dropped.
+- One directive per line. Multi-line values are not supported; continuation lines are dropped, but since v0.3.0 a warning is emitted to stderr ("possible multi-line continuation after `<directive>`; only the first line is captured") so you can notice the truncation. Blank lines reset the tracker, and leading `///` triple-slash lines are treated as blank so there are no false positives on mixed prose.
 - Directives are case-sensitive. `@Metric` is ignored.
 - Duplicate `@metric description` or `@metric calculation` emits a warning to stderr and overwrites the previous value.
 - Unknown `@tags` (for example `@api`, `@param`, `@deprecated`) are silently skipped so they can coexist with other tooling.
@@ -190,11 +190,57 @@ go-metricy-extract --list-rules
 go-metricy-extract --source ./service --validate --validation-report report.json
 ```
 
+### Validation report format (schema_version 1.1)
+
+The `--validation-report` JSON has:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `schema_version` | string | Always `"1.1"`. Bumped from `"1.0"` in v0.3.0 (additive changes only — pre-1.1 consumers that ignore unknown keys continue to read these documents correctly). |
+| `generated_at` | string | ISO-8601 UTC timestamp, second precision. Same layout as snapshot `extracted_at` so timestamps across the two documents are comparable without format massaging. |
+| `violations[]` | array | Every violation with `rule_id`, `severity`, `message`, and `location` (file / line / metric / label / member). Sorted deterministically by `rule_id`. Empty array when there are no violations (never `null`). |
+| `error_count` | int | Total error-severity violations. Zero when clean. |
+| `warning_count` | int | Total warning-severity violations. Zero when clean. |
+| `by_rule[]` | array | Per-rule aggregation: one entry per rule that fired, with `rule_id`, `severity` (effective severity label for the group), `error_count`, and `warning_count`. Sorted by `rule_id`. Empty array when there are no violations. |
+
+Example (clean fixture):
+
+```json
+{
+  "schema_version": "1.1",
+  "generated_at": "2026-04-20T10:00:00Z",
+  "violations": [],
+  "error_count": 0,
+  "warning_count": 0,
+  "by_rule": []
+}
+```
+
+Example (broken fixture, excerpt):
+
+```json
+{
+  "schema_version": "1.1",
+  "generated_at": "2026-04-20T10:00:00Z",
+  "violations": [ /* ... */ ],
+  "error_count": 4,
+  "warning_count": 2,
+  "by_rule": [
+    { "rule_id": "metric.calculation-required", "severity": "error",   "error_count": 1, "warning_count": 0 },
+    { "rule_id": "metric.counter-total-suffix", "severity": "warning", "error_count": 0, "warning_count": 1 }
+  ]
+}
+```
+
 ## What It Extracts
 
 - All four Prometheus metric types: `Counter`, `Gauge`, `Histogram`, `Summary`.
 - Vec variants: `CounterVec`, `GaugeVec`, `HistogramVec`, `SummaryVec` — including their label name lists.
-- Both factory receivers: `prometheus.NewX(...)` and `promauto.NewX(...)`.
+- All three factory call shapes (since v0.3.0):
+  - `prometheus.NewX(...)` — direct call on the `prometheus` package.
+  - `promauto.NewX(...)` — direct call on the `promauto` package (uses the default registry).
+  - `promauto.With(reg).NewX(...)` — chained form that binds to a custom registry. All 8 factories × both receiver forms extract identically.
+- Labels declared as a `[]string{...}` literal inline at the call site, or as a single-level local `var labels = []string{...}` reference in the same file (since v0.3.0). Supports package-level vars that hold a literal slice; multi-name pairwise specs work too.
 - `Name` and `Help` from the inline `prometheus.*Opts` struct literal.
 - Doc-comment annotations: `@metric description`, `@metric calculation`, `@label <name> <description>`.
 - Source location for each metric: file path (repo-root-relative, forward slashes), 1-based line, and declaring identifier (`member`).
@@ -271,12 +317,15 @@ Example snapshot fragment:
 
 | Pattern | Limitation |
 |---------|------------|
-| `promauto.With(reg).NewX(...)` | Not yet supported. Silently skipped. |
 | Dot-import `import . "prometheus"` + bare `NewCounter(...)` | Not recognized. Use the `prometheus.` or `promauto.` receiver prefix. |
 | `NewCounter(opts)` where `opts` is a variable | Config cannot be resolved statically. Emits a warning to stderr and skips the metric. |
 | Non-literal `Name` or `Help` (computed at runtime) | Static analysis reads string literals only. Emits a warning to stderr and skips the metric. |
-| Label names from variables or `[]string{...}` with non-literal elements | Non-literal labels are dropped with a warning; the metric is still emitted with the remaining literal labels. |
-| Multi-line `@metric description` | Not supported. Continuation lines are silently dropped. |
+| Label `[]string{...}` with non-literal *elements* (e.g. `[]string{buildLabel()}`) | Non-literal elements are dropped with a warning; the metric is still emitted with the remaining literal labels. (Element-level — distinct from slice-level var resolution below.) |
+| Two-level label chains (`var b = a; var a = []string{...}`) | Only single-level `var labels = []string{...}` is resolved. Chains through intermediate variables are not followed. Emits a warning and the metric ships without labels. |
+| Alias-typed labels (`type MyLabels []string; var labels = MyLabels{...}`) | Only the raw `[]string{...}` composite literal is recognized. Aliased types fall back to warning. |
+| Function-local `var` labels for top-level metrics | Only package-level vars in the same file as the metric are resolved. Function-scoped vars fall back to warning. |
+| Cross-file or cross-package label vars | Labels must live in the same file as the metric declaration. Warning when the referenced identifier is elsewhere. |
+| Multi-line `@metric description` / `@metric calculation` / `@label` | Only the first line is captured. Since v0.3.0 a warning is emitted to stderr ("possible multi-line continuation…"); the continuation is still dropped. Use single-line values, or split into multiple directives. |
 | System metrics (`expvar`, `runtime/metrics`, `go.opentelemetry.io/otel/metric`) | Not supported. Only `prometheus/client_golang` `New*` factory calls are recognized. |
 
 ## Dependencies

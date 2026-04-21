@@ -55,6 +55,20 @@
       }
     },
     {
+      "name": "chained_promauto_canary_total",
+      "type": "counter",
+      "help": "Canary for chained promauto.With form",
+      "description": "Canary for the chained promauto form; if absent, the extractor has regressed.",
+      "calculation": "Incremented as canary output.",
+      "labels": [],
+      "source_location": {
+        "file": "main.go",
+        "line": 131,
+        "class": null,
+        "member": "CanaryWithReg"
+      }
+    },
+    {
       "name": "errors_total",
       "type": "counter",
       "help": "Total errors across all handlers",

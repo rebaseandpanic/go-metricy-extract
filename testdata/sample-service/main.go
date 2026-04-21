@@ -118,16 +118,17 @@ var JobAttempts = promauto.NewCounterVec(prometheus.CounterOpts{
 
 // customRegistry would normally hold a per-handler collector namespace.
 // In the fixture it's a placeholder so we can declare a promauto.With(reg)
-// metric below and prove the extractor silently skips the chained form.
+// metric below and prove the extractor resolves the chained form.
 var customRegistry = prometheus.NewRegistry()
 
-// SkippedBecauseWithReg is declared via the promauto.With(registry).NewX
-// chained form, which the extractor does NOT support (deferred to v0.2).
-// TestGolden_PromautoWithRegSkipped asserts it stays absent from snapshots.
+// CanaryWithReg demonstrates the promauto.With(registry).NewX chained form.
+// Starting from v0.3.0 the extractor resolves this pattern identically to
+// the plain promauto.NewX form. Earlier versions silently skipped it.
+// TestGolden_PromautoWithRegExtracted asserts it is present in snapshots.
 //
-// @metric description Canary metric — if this appears in the snapshot, the extractor has regressed.
-// @metric calculation Canary — not expected to be counted.
-var SkippedBecauseWithReg = promauto.With(customRegistry).NewCounter(prometheus.CounterOpts{
-	Name: "should_not_appear_in_snapshot_with_reg",
-	Help: "Canary",
+// @metric description Canary for the chained promauto form; if absent, the extractor has regressed.
+// @metric calculation Incremented as canary output.
+var CanaryWithReg = promauto.With(customRegistry).NewCounter(prometheus.CounterOpts{
+	Name: "chained_promauto_canary_total",
+	Help: "Canary for chained promauto.With form",
 })

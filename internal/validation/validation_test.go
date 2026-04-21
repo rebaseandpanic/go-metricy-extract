@@ -5,9 +5,18 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rebaseandpanic/go-metricy-extract/internal/model"
 )
+
+// fixedClock returns a deterministic clock closure pinned to a stable
+// timestamp. Shared across report-tests so generated_at assertions don't
+// depend on wall time.
+func fixedClock() func() time.Time {
+	t := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
+	return func() time.Time { return t }
+}
 
 // fakeRule is a configurable Rule implementation used across the engine
 // tests. Test cases build one (or several) fakeRules, wire them into
@@ -336,23 +345,23 @@ func TestViolation_JSONSerializesAsSeverityString(t *testing.T) {
 	}
 }
 
-func TestReport_SchemaVersionIs10(t *testing.T) {
+func TestReport_SchemaVersionIs11(t *testing.T) {
 	var buf bytes.Buffer
-	if err := WriteReport(&buf, &Result{}); err != nil {
+	if err := WriteReport(&buf, &Result{}, fixedClock()); err != nil {
 		t.Fatalf("WriteReport: %v", err)
 	}
 	var rep Report
 	if err := json.Unmarshal(buf.Bytes(), &rep); err != nil {
 		t.Fatalf("unmarshal: %v (body=%q)", err, buf.String())
 	}
-	if rep.SchemaVersion != "1.0" {
-		t.Errorf("schema_version: got %q, want 1.0", rep.SchemaVersion)
+	if rep.SchemaVersion != "1.1" {
+		t.Errorf("schema_version: got %q, want 1.1", rep.SchemaVersion)
 	}
 }
 
 func TestWriteReport_EmptyResultWritesValidJSON(t *testing.T) {
 	var buf bytes.Buffer
-	if err := WriteReport(&buf, &Result{}); err != nil {
+	if err := WriteReport(&buf, &Result{}, fixedClock()); err != nil {
 		t.Fatalf("WriteReport: %v", err)
 	}
 	// Must be valid JSON.
@@ -368,6 +377,14 @@ func TestWriteReport_EmptyResultWritesValidJSON(t *testing.T) {
 	if parsed["error_count"].(float64) != 0 || parsed["warning_count"].(float64) != 0 {
 		t.Errorf("counts: got errors=%v warnings=%v, want 0/0", parsed["error_count"], parsed["warning_count"])
 	}
+	// Additive v1.1 envelope fields: generated_at must be present,
+	// by_rule must be an empty array (never null).
+	if _, ok := parsed["generated_at"].(string); !ok {
+		t.Errorf("generated_at: got %v (%T), want non-empty string", parsed["generated_at"], parsed["generated_at"])
+	}
+	if br, ok := parsed["by_rule"].([]any); !ok || len(br) != 0 {
+		t.Errorf("by_rule: got %v (%T), want empty array", parsed["by_rule"], parsed["by_rule"])
+	}
 }
 
 func TestWriteReport_IncludesCounts(t *testing.T) {
@@ -381,7 +398,7 @@ func TestWriteReport_IncludesCounts(t *testing.T) {
 		},
 	}
 	var buf bytes.Buffer
-	if err := WriteReport(&buf, res); err != nil {
+	if err := WriteReport(&buf, res, fixedClock()); err != nil {
 		t.Fatalf("WriteReport: %v", err)
 	}
 	var rep Report
@@ -558,21 +575,25 @@ func TestRun_EnrichLocationNilNotPanics(t *testing.T) {
 // normalised to the same envelope shape as an empty Result.
 func TestWriteReport_NilResultProducesEmptyEnvelope(t *testing.T) {
 	var buf bytes.Buffer
-	if err := WriteReport(&buf, nil); err != nil {
+	if err := WriteReport(&buf, nil, fixedClock()); err != nil {
 		t.Fatalf("WriteReport(nil): %v", err)
 	}
 	var rep map[string]any
 	if err := json.Unmarshal(buf.Bytes(), &rep); err != nil {
 		t.Fatalf("unmarshal: %v (body=%q)", err, buf.String())
 	}
-	if rep["schema_version"] != "1.0" {
-		t.Errorf("schema_version: got %v, want 1.0", rep["schema_version"])
+	if rep["schema_version"] != "1.1" {
+		t.Errorf("schema_version: got %v, want 1.1", rep["schema_version"])
 	}
 	if vs, ok := rep["violations"].([]any); !ok || len(vs) != 0 {
 		t.Errorf("violations: got %v, want empty array", rep["violations"])
 	}
 	if rep["error_count"].(float64) != 0 || rep["warning_count"].(float64) != 0 {
 		t.Errorf("counts: got %v/%v, want 0/0", rep["error_count"], rep["warning_count"])
+	}
+	// Additive v1.1 fields: by_rule must be [] (not null) on nil input.
+	if br, ok := rep["by_rule"].([]any); !ok || len(br) != 0 {
+		t.Errorf("by_rule: got %v (%T), want empty array", rep["by_rule"], rep["by_rule"])
 	}
 	// Trailing newline is part of the contract.
 	if b := buf.Bytes(); len(b) == 0 || b[len(b)-1] != '\n' {
@@ -588,7 +609,7 @@ func TestWriteReport_OutputShape(t *testing.T) {
 		Violations: []Violation{{RuleID: "a", Severity: SeverityError, Message: "m"}},
 	}
 	var buf bytes.Buffer
-	if err := WriteReport(&buf, res); err != nil {
+	if err := WriteReport(&buf, res, fixedClock()); err != nil {
 		t.Fatalf("WriteReport: %v", err)
 	}
 	s := buf.String()
@@ -702,3 +723,236 @@ func TestBuildOverrides_EmptyRulesNoPanic(t *testing.T) {
 	}
 }
 
+// TestWriteReport_ByRuleAggregates — by_rule must surface one entry per
+// distinct rule ID, with per-severity counts that match the violations
+// list. Mixed severities within the same engine run exercise the
+// rare-but-valid case where explicit overrides land on the same rule
+// across violations of different origin — use two distinct rule IDs so the
+// grouping is clearly observable.
+func TestWriteReport_ByRuleAggregates(t *testing.T) {
+	res := &Result{
+		Violations: []Violation{
+			{RuleID: "a.b", Severity: SeverityError, Message: "e1"},
+			{RuleID: "a.b", Severity: SeverityError, Message: "e2"},
+			{RuleID: "c.d", Severity: SeverityWarning, Message: "w1"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := WriteReport(&buf, res, fixedClock()); err != nil {
+		t.Fatalf("WriteReport: %v", err)
+	}
+	var rep Report
+	if err := json.Unmarshal(buf.Bytes(), &rep); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rep.ByRule) != 2 {
+		t.Fatalf("by_rule entries: got %d, want 2 (%+v)", len(rep.ByRule), rep.ByRule)
+	}
+	// Sort by RuleID is tested separately; rely on the contract here.
+	if rep.ByRule[0].RuleID != "a.b" || rep.ByRule[0].Severity != "error" ||
+		rep.ByRule[0].ErrorCount != 2 || rep.ByRule[0].WarningCount != 0 {
+		t.Errorf("a.b entry: got %+v, want {a.b error 2/0}", rep.ByRule[0])
+	}
+	if rep.ByRule[1].RuleID != "c.d" || rep.ByRule[1].Severity != "warning" ||
+		rep.ByRule[1].ErrorCount != 0 || rep.ByRule[1].WarningCount != 1 {
+		t.Errorf("c.d entry: got %+v, want {c.d warning 0/1}", rep.ByRule[1])
+	}
+}
+
+// TestWriteReport_ByRuleSortedDeterministically — violations added in
+// random RuleID order must produce a by_rule list sorted ordinally by
+// RuleID regardless of input order. Guards golden stability.
+func TestWriteReport_ByRuleSortedDeterministically(t *testing.T) {
+	res := &Result{
+		Violations: []Violation{
+			{RuleID: "z.last", Severity: SeverityError, Message: "m"},
+			{RuleID: "a.first", Severity: SeverityError, Message: "m"},
+			{RuleID: "m.mid", Severity: SeverityWarning, Message: "m"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := WriteReport(&buf, res, fixedClock()); err != nil {
+		t.Fatalf("WriteReport: %v", err)
+	}
+	var rep Report
+	if err := json.Unmarshal(buf.Bytes(), &rep); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	wantOrder := []string{"a.first", "m.mid", "z.last"}
+	for i, want := range wantOrder {
+		if rep.ByRule[i].RuleID != want {
+			t.Errorf("by_rule[%d]: got %q, want %q", i, rep.ByRule[i].RuleID, want)
+		}
+	}
+}
+
+// TestWriteReport_MixedSeverityByRule_PromotesToError — the defensive W1
+// loop promotes a mixed-severity rule group to Severity="error" so the
+// label reflects the worst observed violation. Engine re-stamping makes
+// this impossible in practice, but a hand-constructed Result (bypassing
+// the engine) can still land mixed severities under one RuleID; the
+// report contract must handle it deterministically. Supersedes the
+// earlier "first-violation wins" contract.
+func TestWriteReport_MixedSeverityByRule_PromotesToError(t *testing.T) {
+	res := &Result{
+		Violations: []Violation{
+			{RuleID: "mixed.rule", Severity: SeverityError, Message: "err-one"},
+			{RuleID: "mixed.rule", Severity: SeverityWarning, Message: "warn-one"},
+			{RuleID: "mixed.rule", Severity: SeverityError, Message: "err-two"},
+		},
+	}
+	var buf bytes.Buffer
+	if err := WriteReport(&buf, res, fixedClock()); err != nil {
+		t.Fatalf("WriteReport: %v", err)
+	}
+	var rep Report
+	if err := json.Unmarshal(buf.Bytes(), &rep); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rep.ByRule) != 1 {
+		t.Fatalf("want 1 rule entry, got %d (%+v)", len(rep.ByRule), rep.ByRule)
+	}
+	rc := rep.ByRule[0]
+	if rc.Severity != "error" {
+		t.Errorf("Severity: got %q, want error (promoted from mixed)", rc.Severity)
+	}
+	if rc.ErrorCount != 2 {
+		t.Errorf("ErrorCount: got %d, want 2", rc.ErrorCount)
+	}
+	if rc.WarningCount != 1 {
+		t.Errorf("WarningCount: got %d, want 1", rc.WarningCount)
+	}
+}
+
+// TestWriteReport_NonUTCClockNormalizedToUTC — clocks in a non-UTC zone
+// (e.g. Moscow +03:00) must be converted to UTC before formatting so the
+// wire output always ends with the literal "Z" suffix. Without this
+// conversion, Format would emit an offset like "+0300" and break the
+// byte-stable golden contract shared with MetricSnapshot.ExtractedAt.
+func TestWriteReport_NonUTCClockNormalizedToUTC(t *testing.T) {
+	moscow := time.FixedZone("MSK", 3*3600)
+	fixedTime := time.Date(2026, 4, 21, 15, 0, 0, 0, moscow) // 15:00 MSK = 12:00 UTC
+	clock := func() time.Time { return fixedTime }
+
+	var buf bytes.Buffer
+	if err := WriteReport(&buf, &Result{}, clock); err != nil {
+		t.Fatalf("WriteReport: %v", err)
+	}
+
+	var rep Report
+	if err := json.Unmarshal(buf.Bytes(), &rep); err != nil {
+		t.Fatalf("unmarshal: %v (body=%q)", err, buf.String())
+	}
+	const want = "2026-04-21T12:00:00Z"
+	if rep.GeneratedAt != want {
+		t.Errorf("GeneratedAt: got %q, want %q (UTC)", rep.GeneratedAt, want)
+	}
+	if !strings.HasSuffix(rep.GeneratedAt, "Z") {
+		t.Errorf("GeneratedAt should end with Z; got %q", rep.GeneratedAt)
+	}
+}
+
+// TestWriteReport_FieldOrderIsStable pins the order of top-level fields
+// in the emitted JSON: schema_version, generated_at, violations,
+// error_count, warning_count, by_rule. Go's encoding/json writes struct
+// fields in declaration order, so this test guards against accidental
+// reshuffling of the Report struct that would break byte-stable golden
+// files in downstream consumers.
+func TestWriteReport_FieldOrderIsStable(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteReport(&buf, &Result{}, fixedClock()); err != nil {
+		t.Fatalf("WriteReport: %v", err)
+	}
+
+	s := buf.String()
+	order := []string{
+		`"schema_version"`,
+		`"generated_at"`,
+		`"violations"`,
+		`"error_count"`,
+		`"warning_count"`,
+		`"by_rule"`,
+	}
+
+	lastPos := -1
+	for _, key := range order {
+		pos := strings.Index(s, key)
+		if pos == -1 {
+			t.Errorf("key %s missing from output", key)
+			continue
+		}
+		if pos <= lastPos {
+			t.Errorf("key %s at pos %d appears after previous (pos %d) — field order reshuffled", key, pos, lastPos)
+		}
+		lastPos = pos
+	}
+}
+
+// TestWriteReport_GeneratedAtUsesClockOverride — when a fixed clock is
+// injected, generated_at matches the pinned instant in ISO-8601 UTC
+// second-precision. This is the mechanism golden-file tests rely on for
+// byte stability.
+func TestWriteReport_GeneratedAtUsesClockOverride(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteReport(&buf, &Result{}, fixedClock()); err != nil {
+		t.Fatalf("WriteReport: %v", err)
+	}
+	var rep Report
+	if err := json.Unmarshal(buf.Bytes(), &rep); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	const want = "2026-04-20T10:00:00Z"
+	if rep.GeneratedAt != want {
+		t.Errorf("generated_at: got %q, want %q", rep.GeneratedAt, want)
+	}
+}
+
+// TestWriteReport_GeneratedAtDefaultsToTimeNow — a nil clock falls back to
+// time.Now. We can't assert the exact value without racing, so we verify
+// the shape (non-empty, parseable in the documented format).
+func TestWriteReport_GeneratedAtDefaultsToTimeNow(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteReport(&buf, &Result{}, nil); err != nil {
+		t.Fatalf("WriteReport: %v", err)
+	}
+	var rep Report
+	if err := json.Unmarshal(buf.Bytes(), &rep); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if rep.GeneratedAt == "" {
+		t.Fatal("generated_at: got empty, want non-empty")
+	}
+	if _, err := time.Parse(model.ExtractedAtLayout, rep.GeneratedAt); err != nil {
+		t.Errorf("generated_at not in expected format: %q (%v)", rep.GeneratedAt, err)
+	}
+}
+
+// TestWriteReport_EmptyResultHasByRuleAsEmptyArray — a Result with no
+// violations must serialize by_rule as [] (not null). Repeats the same
+// check the envelope test performs, but at the typed-struct level to
+// catch any accidental *RuleCount conversions.
+func TestWriteReport_EmptyResultHasByRuleAsEmptyArray(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteReport(&buf, &Result{}, fixedClock()); err != nil {
+		t.Fatalf("WriteReport: %v", err)
+	}
+	// Raw substring check: "null" would indicate the nil-slice path
+	// leaked through; "[]" is the contract.
+	s := buf.String()
+	if !strings.Contains(s, "\"by_rule\": []") {
+		t.Errorf("by_rule not [] in output: %s", s)
+	}
+}
+
+// TestWriteReport_NilResultHasByRuleAsEmptyArray — same check as the
+// EmptyResult variant, but for the nil-Result path through WriteReport.
+func TestWriteReport_NilResultHasByRuleAsEmptyArray(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteReport(&buf, nil, fixedClock()); err != nil {
+		t.Fatalf("WriteReport(nil): %v", err)
+	}
+	s := buf.String()
+	if !strings.Contains(s, "\"by_rule\": []") {
+		t.Errorf("by_rule not [] in output: %s", s)
+	}
+}

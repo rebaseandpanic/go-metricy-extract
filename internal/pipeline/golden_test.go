@@ -187,7 +187,7 @@ func TestGolden_ValidationReportMatchesFixture(t *testing.T) {
 	})
 
 	var buf bytes.Buffer
-	if err := validation.WriteReport(&buf, valRes); err != nil {
+	if err := validation.WriteReport(&buf, valRes, func() time.Time { return fixedExtractedAt }); err != nil {
 		t.Fatalf("WriteReport: %v", err)
 	}
 
@@ -213,7 +213,7 @@ func TestGolden_BrokenFixtureValidationReport(t *testing.T) {
 	})
 
 	var buf bytes.Buffer
-	if err := validation.WriteReport(&buf, valRes); err != nil {
+	if err := validation.WriteReport(&buf, valRes, func() time.Time { return fixedExtractedAt }); err != nil {
 		t.Fatalf("WriteReport: %v", err)
 	}
 
@@ -246,25 +246,30 @@ func TestGolden_VendorMetricsSkipped(t *testing.T) {
 	}
 }
 
-// TestGolden_PromautoWithRegSkipped is the chain-form counterpart to
-// TestGolden_VendorMetricsSkipped. The extractor deliberately does not
-// support `promauto.With(reg).NewX(...)` (the selector's receiver is a
-// CallExpr, not a bare Ident — see internal/extractor/extractor.go).
-// Today's contract is "silent skip"; this test pins that contract so a
-// future change that wires up chain-form extraction has to consciously
-// regenerate the golden alongside updating this test.
-func TestGolden_PromautoWithRegSkipped(t *testing.T) {
+// TestGolden_PromautoWithRegExtracted pins the v0.3.0-A contract: the
+// extractor resolves the `promauto.With(reg).NewX(...)` chained form
+// identically to the plain `promauto.NewX(...)` / `prometheus.NewX(...)`
+// forms. The fixture declares one such metric (CanaryWithReg) whose Name
+// is asserted below; if it is ever absent, the chain-form handling has
+// regressed.
+//
+// Earlier versions (pre-v0.3.0) silently skipped this shape, and this test
+// was its inverse assertion. The rename is deliberate: mistakenly restoring
+// the old skip behaviour should fail this test's lookup, not its negation.
+func TestGolden_PromautoWithRegExtracted(t *testing.T) {
 	res := runSampleService(t)
 
 	if len(res.Snapshot.Metrics) == 0 {
 		t.Fatalf("walker returned zero metrics; canary is moot — investigate walker regression")
 	}
 
+	const wantName = "chained_promauto_canary_total"
 	for _, m := range res.Snapshot.Metrics {
-		if m.Name == "should_not_appear_in_snapshot_with_reg" {
-			t.Errorf("promauto.With(reg) metric leaked into snapshot: %+v", m)
+		if m.Name == wantName {
+			return
 		}
 	}
+	t.Errorf("chained promauto.With(reg).NewCounter metric %q missing from snapshot (chain-form extraction regressed)", wantName)
 }
 
 // TestGolden_DeterministicAcrossRuns verifies that two back-to-back runs

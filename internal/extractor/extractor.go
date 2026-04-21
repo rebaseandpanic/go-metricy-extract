@@ -13,10 +13,11 @@
 //     exists, labels are partial. Missing labels argument entirely
 //     remains warn + skip.
 //
-// Receiver recognition is syntactic: only bare `prometheus.*` and
-// `promauto.*` are matched. Aliased imports (e.g. `import promauto2 "..."`)
-// are not resolved; chain forms like `promauto.With(reg).NewX(...)` are
-// silently skipped and may be supported in a later release.
+// Receiver recognition is syntactic: bare `prometheus.*`, bare `promauto.*`,
+// and the `promauto.With(reg).NewX(...)` chained form are matched. Aliased
+// imports (e.g. `import promauto2 "..."`) are not resolved; double-chained
+// forms like `promauto.With(a).With(b).NewX(...)` and non-promauto helpers
+// like `pkg.Helper(reg).NewX(...)` are silently skipped.
 //
 // Source location: emitted [model.MetricDescriptor.SourceLocation] always
 // has Class == nil — Go has no C#-style classes, and the extractor only
@@ -80,8 +81,10 @@ var metricKinds = map[string]metricKind{
 }
 
 // recognizedReceivers is the set of package qualifiers we accept as the
-// receiver of a metric-factory call. `promauto.With(reg).NewX(...)` is a
-// different shape (method on a call result) and remains unsupported here.
+// direct (non-chained) receiver of a metric-factory call. The chained form
+// `promauto.With(reg).NewX(...)` is recognized separately by
+// isRecognizedReceiver — the argument to `With(...)` is a runtime registry
+// object we deliberately do not inspect.
 var recognizedReceivers = map[string]struct{}{
 	"prometheus": {},
 	"promauto":   {},
@@ -159,7 +162,7 @@ func ExtractSourceWithOptions(fset *token.FileSet, filename string, src any, opt
 			if !ok {
 				continue
 			}
-			extractFromValueSpec(vs, gen, parser, fset, opts.RepoRoot, res)
+			extractFromValueSpec(vs, gen, file, parser, fset, opts.RepoRoot, res)
 		}
 	}
 
@@ -186,8 +189,10 @@ func goParseFile(fset *token.FileSet, filename string, src any) (*ast.File, erro
 // and the comment sits on the GenDecl).
 //
 // fset + repoRoot are threaded through so each extracted metric can be
-// annotated with its source location.
-func extractFromValueSpec(vs *ast.ValueSpec, gen *ast.GenDecl, parser annotations.AnnotationParser, fset *token.FileSet, repoRoot string, res *Result) {
+// annotated with its source location. file is passed to downstream helpers
+// for single-level AST resolution of local `var labels = []string{...}`
+// references passed as a Vec constructor's second argument.
+func extractFromValueSpec(vs *ast.ValueSpec, gen *ast.GenDecl, file *ast.File, parser annotations.AnnotationParser, fset *token.FileSet, repoRoot string, res *Result) {
 	if len(vs.Values) == 0 {
 		return
 	}
@@ -226,7 +231,7 @@ func extractFromValueSpec(vs *ast.ValueSpec, gen *ast.GenDecl, parser annotation
 			ctx.varName = vs.Names[i].Name
 			ctx.namePos = vs.Names[i].NamePos
 		}
-		extractFromCall(call, ctx, fset, repoRoot, res)
+		extractFromCall(call, ctx, file, fset, repoRoot, res)
 	}
 }
 
@@ -250,8 +255,10 @@ func resolveDocText(vs *ast.ValueSpec, gen *ast.GenDecl) string {
 //
 // fset + repoRoot are consulted when building the emitted metric's
 // SourceLocation. If fset is nil or ctx.namePos is invalid the location
-// is omitted.
-func extractFromCall(call *ast.CallExpr, ctx declContext, fset *token.FileSet, repoRoot string, res *Result) {
+// is omitted. file is forwarded to [extractVecLabels] so a Vec's label
+// argument can be resolved against top-level `var labels = []string{...}`
+// declarations in the same file (single-level, in-file only).
+func extractFromCall(call *ast.CallExpr, ctx declContext, file *ast.File, fset *token.FileSet, repoRoot string, res *Result) {
 	sel, ok := call.Fun.(*ast.SelectorExpr)
 	if !ok {
 		// Non-receiver call (e.g. `NewCounter(...)` via dot-import) — not a
@@ -259,19 +266,20 @@ func extractFromCall(call *ast.CallExpr, ctx declContext, fset *token.FileSet, r
 		return
 	}
 
-	recvIdent, ok := sel.X.(*ast.Ident)
-	if !ok {
-		// Chained selector like `a.b.NewCounter(...)` or
-		// `promauto.With(reg).NewCounter(...)` — sel.X is not a bare ident, so
-		// it falls outside the shapes we recognize. Skip silently.
-		return
-	}
-
-	if _, ok := recognizedReceivers[recvIdent.Name]; !ok {
-		return
-	}
-
 	if sel.Sel == nil {
+		return
+	}
+
+	// Resolve the receiver shape. Two patterns are accepted:
+	//
+	//  1. Bare identifier: `prometheus.NewX(...)` / `promauto.NewX(...)`.
+	//  2. Chained call:    `promauto.With(reg).NewX(...)` — here sel.X is
+	//     itself a *ast.CallExpr whose Fun is `promauto.With`.
+	//
+	// Anything else (`a.b.NewX`, `pkg.Helper(reg).NewX`,
+	// `promauto.With(a).With(b).NewX`) falls through as an unrecognized
+	// shape and is silently skipped.
+	if !isRecognizedReceiver(sel.X) {
 		return
 	}
 
@@ -318,7 +326,7 @@ func extractFromCall(call *ast.CallExpr, ctx declContext, fset *token.FileSet, r
 	var labels []model.LabelDescriptor
 	extractedLabelSet := map[string]struct{}{}
 	if kind.isVec {
-		labelNames, vecWarns, skip := extractVecLabels(call, ctx)
+		labelNames, vecWarns, skip := extractVecLabels(call, ctx, file)
 		res.Warnings = append(res.Warnings, vecWarns...)
 		if skip {
 			return
@@ -419,21 +427,51 @@ func labelDescriptionFromAnn(ann annotations.Annotations, name string) *string {
 // Duplicate label names are preserved in source order (not deduplicated);
 // a warning is emitted once per duplicated name. Validation of the resulting
 // label set against Prometheus registration rules is handled by later stages.
-func extractVecLabels(call *ast.CallExpr, ctx declContext) (labels []string, warnings []string, skip bool) {
+//
+// When the labels argument is a bare identifier (e.g. `commonLabels`), a
+// single-level lookup against file's top-level `var <name> = []string{...}`
+// declarations is attempted. Only the direct literal form is resolved:
+// chains (`var b = a`), function calls, package-qualified references, and
+// parameter/local-scope identifiers fall through to the non-literal warning.
+func extractVecLabels(call *ast.CallExpr, ctx declContext, file *ast.File) (labels []string, warnings []string, skip bool) {
 	if len(call.Args) < 2 {
 		return nil, []string{formatWarning(ctx, "Vec constructor requires labels argument; skipping metric")}, true
 	}
 
-	lit, ok := call.Args[1].(*ast.CompositeLit)
-	if !ok {
-		// labels passed as variable, function call, or other non-literal expression.
+	switch arg := call.Args[1].(type) {
+	case *ast.CompositeLit:
+		labels, warnings = extractLabelsFromLit(arg, ctx)
+		return labels, warnings, false
+	case *ast.Ident:
+		// Attempt single-level, in-file resolution to a top-level
+		// `var <name> = []string{...}` declaration.
+		if lit := resolveLocalStringSliceVar(file, arg.Name); lit != nil {
+			labels, warnings = extractLabelsFromLit(lit, ctx)
+			return labels, warnings, false
+		}
+		return nil, []string{formatWarning(ctx, "labels argument is not a []string{...} literal; emitting metric without labels")}, false
+	default:
+		// Selector (`pkg.Labels`), function call, map literal, etc.
 		return nil, []string{formatWarning(ctx, "labels argument is not a []string{...} literal; emitting metric without labels")}, false
 	}
+}
 
-	// Accept a composite literal with explicit []string type, or with nil Type
-	// (the very uncommon top-level case where the type is inferred from context).
+// extractLabelsFromLit walks a *ast.CompositeLit that is expected to be a
+// `[]string{...}` literal and returns the extracted label names plus any
+// warnings. The function accepts the same degraded shapes as the inline
+// path: wrong element type (non-basic, non-string) → skipped with warning;
+// empty slice → empty-labels warning; duplicates → one warning per dup.
+//
+// Called both when the Vec's second argument is inline and when it resolves
+// to a top-level `var <name> = []string{...}` declaration — keeping both
+// paths in one helper ensures uniform warning wording.
+func extractLabelsFromLit(lit *ast.CompositeLit, ctx declContext) (labels []string, warnings []string) {
+	// Accept a composite literal with explicit []string type. The nil-Type branch
+	// is only reachable from synthetic/invalid input (valid Go always specifies
+	// the type at package-level var and in Vec-constructor arguments); retained
+	// as a defensive no-op mirroring the restrictive check in resolveLocalStringSliceVar.
 	if lit.Type != nil && !isStringSlice(lit.Type) {
-		return nil, []string{formatWarning(ctx, "labels argument is not a []string{...} literal; emitting metric without labels")}, false
+		return nil, []string{formatWarning(ctx, "labels argument is not a []string{...} literal; emitting metric without labels")}
 	}
 
 	// Empty slice literal: `[]string{}`. The element loop below would never
@@ -441,7 +479,7 @@ func extractVecLabels(call *ast.CallExpr, ctx declContext) (labels []string, war
 	// "zero literal names" case which implies non-literal elements were
 	// present but unreadable).
 	if len(lit.Elts) == 0 {
-		return nil, []string{formatWarning(ctx, "Vec constructor has empty labels slice; emitting metric with zero labels")}, false
+		return nil, []string{formatWarning(ctx, "Vec constructor has empty labels slice; emitting metric with zero labels")}
 	}
 
 	var nonLiteral bool
@@ -480,7 +518,105 @@ func extractVecLabels(call *ast.CallExpr, ctx declContext) (labels []string, war
 		}
 	}
 
-	return labels, warnings, false
+	return labels, warnings
+}
+
+// resolveLocalStringSliceVar searches file's top-level declarations for a
+// `var <name> = []string{...}` spec whose LHS identifier matches name and
+// whose corresponding RHS is a [labels] composite literal of type []string
+// (explicit type or untyped — the element loop downstream handles either).
+// Returns the CompositeLit on success, nil otherwise.
+//
+// Single-level semantics: the RHS must itself be a CompositeLit. Chains
+// (`var b = a`), function calls (`var b = makeLabels()`), selector exprs
+// (`var b = pkg.Labels`) all return nil — the caller then emits the
+// standard "labels argument is not a []string{...} literal" warning.
+//
+// Pairwise matching: for multi-name specs (`var a, b = []string{...}, X`)
+// the name is matched against vs.Names[i] and only vs.Values[i] is
+// inspected. Split-decl `var a, b []string` has len(Values) == 0 and is
+// skipped as unresolvable.
+func resolveLocalStringSliceVar(file *ast.File, name string) *ast.CompositeLit {
+	if file == nil || name == "" {
+		return nil
+	}
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.VAR {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, ident := range vs.Names {
+				if ident == nil || ident.Name != name {
+					continue
+				}
+				// Split declaration (`var a, b []string`) — no values at all.
+				// Pairwise mismatch (`var a, b = f()` with len(Values)==1)
+				// — index out of range would panic, so skip.
+				if i >= len(vs.Values) {
+					return nil
+				}
+				lit, ok := vs.Values[i].(*ast.CompositeLit)
+				if !ok {
+					return nil
+				}
+				// Untyped literal (Type==nil) is ambiguous without type info;
+				// require an explicit []string to be safe. The downstream
+				// helper will verify this too, but checking here keeps the
+				// contract crisp: "resolved only when type is []string".
+				if lit.Type == nil || !isStringSlice(lit.Type) {
+					return nil
+				}
+				return lit
+			}
+		}
+	}
+	return nil
+}
+
+// isRecognizedReceiver reports whether expr is one of the receiver shapes
+// we treat as a prometheus/promauto metric factory receiver:
+//
+//   - bare ident `prometheus` or `promauto`
+//   - chained call `promauto.With(<anything>)`
+//
+// The argument to `With(...)` is intentionally not inspected — it's a
+// runtime registry object (often `prometheus.NewRegistry()`, a package-level
+// var, or a field access) that carries no extraction-relevant metadata.
+//
+// Double-chained forms (`promauto.With(a).With(b)`) and non-promauto helpers
+// (`pkg.Helper(reg)`) fall through to false — their shape is indistinguishable
+// from arbitrary user code and must remain out of scope.
+func isRecognizedReceiver(expr ast.Expr) bool {
+	switch x := expr.(type) {
+	case *ast.Ident:
+		_, ok := recognizedReceivers[x.Name]
+		return ok
+	case *ast.CallExpr:
+		// Expect the shape `promauto.With(<expr>)`. Argument count isn't
+		// checked — promauto.With takes exactly one registerer, but enforcing
+		// that here would duplicate the compiler's job and reject syntactically
+		// valid calls that happen to mismatch at the type level.
+		innerSel, ok := x.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		innerRecv, ok := innerSel.X.(*ast.Ident)
+		if !ok {
+			// innerSel.X is itself another call (double-chained) or some other
+			// shape we don't recognize — skip silently.
+			return false
+		}
+		if innerRecv.Name != "promauto" {
+			return false
+		}
+		return innerSel.Sel != nil && innerSel.Sel.Name == "With"
+	}
+	return false
 }
 
 // isStringSlice reports whether expr is the type expression `[]string`.
