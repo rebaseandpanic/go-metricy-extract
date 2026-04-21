@@ -127,6 +127,30 @@ Conventions — influenced by [`swaggo/swag`](https://github.com/swaggo/swag), w
 | `--high-cardinality-labels <csv>` | no | built-in list | Override default high-cardinality label patterns for `metric.label-high-cardinality-hint` (comma-separated, e.g. `tenant_id,device_id`). Setting this without `--enable-rule metric.label-high-cardinality-hint` prints a stderr warning — the rule is off by default. |
 | `--list-rules` | no | off | Print all validation rules (ID, severity, default on/off, description) and exit 0. Does not require `--source`. |
 
+## Exit Codes
+
+`go-metricy-extract` uses distinct exit codes so CI scripts can
+differentiate between user error, validation findings, and tool failures:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success — extraction completed and (if requested) validation passed |
+| `1` | Validation failed — at least one error-severity violation present |
+| `2` | CLI usage error — invalid flag, missing `--source`, malformed argument |
+| `3` | Tool crashed — pipeline, serialization, or I/O failure |
+
+**Breaking change in v0.3.1:** earlier versions returned `1` for both
+validation failures and tool crashes. CI scripts that relied on `exit
+code != 0` continue to work. Scripts that distinguish failure types should
+update to the new taxonomy.
+
+**Note on `--source` path issues:** a non-existent `--source` directory, a
+`--source` pointing at a file (not a directory), or permission/I/O failures
+during the directory walk are classified as tool crashes (exit 3), not CLI
+usage errors (exit 2). The CLI only validates the *presence* of required
+flags; path semantics are checked at runtime and failures indicate the
+environment does not match what the caller expected.
+
 ## Validation
 
 Running `--validate` checks the snapshot against **15 built-in rules** — 7 errors + 7 warnings on by default + 1 warning off by default. Any error-severity violation returns exit 1. Warnings do not affect the exit code unless `--strict` is set.

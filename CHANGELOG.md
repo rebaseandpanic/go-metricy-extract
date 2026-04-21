@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-04-21
+
+**BREAKING CHANGE:** Exit code taxonomy split — tool crashes and validation
+failures no longer share exit code 1. See README "Exit Codes" section.
+
+- [BUGFIX] Exit code semantics: `0` success, `1` validation failed, `2` CLI
+  usage error, `3` tool crashed. Previously `1` mixed validation-failure and
+  tool-crash, making CI scripts unable to distinguish "your code has issues"
+  from "go-metricy-extract itself broke".
+- [UX] Updated documentation in README to describe exit code conventions.
+
 ## [0.3.0] - 2026-04-21
 
 - [FEATURE] Extractor now resolves `promauto.With(registry).NewX(...)` chained form; previously silently skipped. All 8 metric factories × both direct and chained receivers now extract identically

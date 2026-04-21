@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/rebaseandpanic/go-metricy-extract/internal/model"
 	"github.com/rebaseandpanic/go-metricy-extract/internal/pipeline"
@@ -62,14 +63,20 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// run is the CLI entry point, factored for testability. Exit codes:
+// run is the CLI entry point, factored for testability. Exit codes follow
+// a four-way taxonomy so CI scripts can distinguish user error, validation
+// findings, and tool failures:
 //
-//	0 — success (including --help, and --validate when no error-severity
-//	    violations were found)
-//	1 — fatal error (missing source dir, walk failure, output write error,
-//	    serialization failure, validation-report write failure, or any
-//	    error-severity validation violation under --validate)
-//	2 — CLI usage error (unknown flag, missing --source)
+//	0 — success; validation passed or --validate was not requested
+//	1 — validation failed (error-severity violations present)
+//	2 — CLI usage error (invalid flags, missing --source)
+//	3 — tool crashed (pipeline, marshal, or I/O failure)
+//
+// Callers (CI scripts) can distinguish "your code has issues" (1) from
+// "go-metricy-extract itself broke" (3).
+//
+// Breaking change in v0.3.1: earlier versions returned 1 for both
+// validation failures and tool crashes, making those cases indistinguishable.
 func run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("go-metricy-extract", flag.ContinueOnError)
 	// Silence the flag package's default output; we route usage/errors manually
@@ -155,7 +162,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if listRules {
 		if err := printRuleList(stdout); err != nil {
 			fmt.Fprintf(stderr, "error: failed to print rule list: %s\n", err)
-			return 1
+			return 3
 		}
 		return 0
 	}
@@ -216,7 +223,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "error: %s\n", err)
-		return 1
+		return 3
 	}
 
 	// Warnings are diagnostic noise — keep them on stderr so piping the
@@ -226,13 +233,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	// Validation — runs before snapshot write so a validation-report write
-	// error can abort with exit 1 without leaving a half-configured state.
-	// The snapshot itself is still written unless report I/O failed, matching
-	// the "fail-fast on I/O error" contract of other CLI flags.
+	// error can abort without leaving a half-configured state. The snapshot
+	// itself is still written unless report I/O failed, matching the
+	// "fail-fast on I/O error" contract of other CLI flags.
 	//
 	// hasValidationError distinguishes "report was fine, but a rule flagged
-	// an error-severity violation" from "report I/O failed". The former lets
-	// the snapshot write proceed; the latter short-circuits to exit 1.
+	// an error-severity violation" (exit 1) from "report I/O failed" (exit 3).
+	// The former lets the snapshot write proceed; the latter short-circuits
+	// to exit 3 because it's a tool-crash rather than a user-code issue.
 	var hasValidationError bool
 	if validate {
 		ok, vErr := runValidation(
@@ -246,7 +254,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			highCardLabels,
 		)
 		if !ok {
-			return 1
+			return 3
 		}
 		hasValidationError = vErr
 	}
@@ -254,14 +262,14 @@ func run(args []string, stdout, stderr io.Writer) int {
 	data, err := json.MarshalIndent(res.Snapshot, "", "  ")
 	if err != nil {
 		fmt.Fprintf(stderr, "error: failed to serialize snapshot: %s\n", err)
-		return 1
+		return 3
 	}
 	data = append(data, '\n')
 
 	if output == "" {
 		if _, err := stdout.Write(data); err != nil {
 			fmt.Fprintf(stderr, "error: failed to write snapshot: %s\n", err)
-			return 1
+			return 3
 		}
 	} else {
 		// Atomic write: write to <output>.tmp then rename. Avoids leaving a
@@ -270,17 +278,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 		tmp := output + ".tmp"
 		if err := os.WriteFile(tmp, data, 0o644); err != nil {
 			fmt.Fprintf(stderr, "error: failed to write %s: %s\n", tmp, err)
-			return 1
+			return 3
 		}
 		if err := os.Rename(tmp, output); err != nil {
 			_ = os.Remove(tmp) // best-effort cleanup; ignore removal error
 			fmt.Fprintf(stderr, "error: failed to rename %s -> %s: %s\n", tmp, output, err)
-			return 1
+			return 3
 		}
 	}
 
 	// Violation-driven exit code applies last so snapshot output is always
-	// written before we fail the run.
+	// written before we fail the run. Exit 1 means "validation found
+	// error-severity issues" — distinct from exit 3 (tool crash) above.
 	if hasValidationError {
 		return 1
 	}
@@ -290,8 +299,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 // runValidation runs the validation engine and handles report emission.
 // Returns (ok, hasError):
 //
-//	ok == false           → report I/O failed; caller must exit 1 immediately
-//	                        (snapshot write should be skipped).
+//	ok == false           → report I/O failed (tool-crash path); caller must
+//	                        exit 3 immediately (snapshot write should be skipped).
 //	ok == true, err true  → at least one error-severity violation was found;
 //	                        caller writes the snapshot and then exits 1.
 //	ok == true, err false → no error-severity violations; caller exits 0.
@@ -396,7 +405,7 @@ func runValidation(
 			fmt.Fprintf(stderr, "error: failed to create validation report %s: %s\n", reportPath, err)
 			return false, false
 		}
-		writeErr := validation.WriteReport(f, valRes)
+		writeErr := validation.WriteReport(f, valRes, time.Now)
 		closeErr := f.Close()
 		if writeErr != nil {
 			fmt.Fprintf(stderr, "error: failed to write validation report %s: %s\n", reportPath, writeErr)

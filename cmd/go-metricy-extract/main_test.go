@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -124,7 +125,7 @@ var X = prometheus.NewCounter(prometheus.CounterOpts{Name: "x_total", Help: "x"}
 	}
 }
 
-func TestRun_OutputFileWriteErrorReturnsExit1(t *testing.T) {
+func TestRun_OutputFileWriteErrorReturnsExit3(t *testing.T) {
 	root := t.TempDir()
 	writeGoFile(t, root, "m.go", `package p
 import "github.com/prometheus/client_golang/prometheus"
@@ -135,10 +136,12 @@ var X = prometheus.NewCounter(prometheus.CounterOpts{Name: "x", Help: "y"})
 	// Parent directory does not exist — WriteFile must fail on the .tmp file
 	// (atomic-write pattern writes to <output>.tmp first, then renames).
 	// Portable: TempDir root exists, a nested subdir beneath it does not.
+	// Exit 3 because a filesystem write failure is a tool-crash (I/O), not
+	// a validation finding — CI scripts distinguish these cases.
 	bad := filepath.Join(t.TempDir(), "does-not-exist", "out.json")
 	code := run([]string{"--source", root, "--output", bad}, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("exit code: got %d, want 1 (stderr=%q)", code, stderr.String())
+	if code != 3 {
+		t.Fatalf("exit code: got %d, want 3 (stderr=%q)", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "failed to write") {
 		t.Errorf("stderr missing 'failed to write': %q", stderr.String())
@@ -173,12 +176,16 @@ func{
 	}
 }
 
-func TestRun_MissingSourceDirReturnsExit1(t *testing.T) {
+func TestRun_MissingSourceDirReturnsExit3(t *testing.T) {
+	// --source pointing at a non-existent path makes the pipeline fail
+	// before any validation runs. That's a tool-crash (exit 3), distinct
+	// from "your code has validation issues" (exit 1) or "you passed bad
+	// flags" (exit 2).
 	var stdout, stderr bytes.Buffer
 	missing := filepath.Join(t.TempDir(), "does-not-exist", "path")
 	code := run([]string{"--source", missing}, &stdout, &stderr)
-	if code != 1 {
-		t.Errorf("exit code: got %d, want 1 (stderr=%q)", code, stderr.String())
+	if code != 3 {
+		t.Errorf("exit code: got %d, want 3 (stderr=%q)", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "error:") {
 		t.Errorf("stderr missing 'error:' prefix: %q", stderr.String())
@@ -382,8 +389,8 @@ func TestRun_ValidateReport_WritesFile(t *testing.T) {
 	if err := json.Unmarshal(data, &rep); err != nil {
 		t.Fatalf("report JSON: %v (content=%q)", err, string(data))
 	}
-	if rep["schema_version"] != "1.0" {
-		t.Errorf("report schema_version: got %v, want 1.0", rep["schema_version"])
+	if rep["schema_version"] != "1.1" {
+		t.Errorf("report schema_version: got %v, want 1.1", rep["schema_version"])
 	}
 	if vs, ok := rep["violations"].([]any); !ok || len(vs) != 0 {
 		t.Errorf("report violations: got %v, want empty array", rep["violations"])
@@ -541,18 +548,19 @@ func TestRun_MinDescriptionLengthUnsetNoWarning(t *testing.T) {
 	}
 }
 
-// TestRun_ValidateReport_WriteErrorReturnsExit1 — when --validation-report
+// TestRun_ValidateReport_WriteErrorReturnsExit3 — when --validation-report
 // points at a path whose parent dir does not exist, the CLI must fail fast
-// with exit 1 and a stderr "failed to create validation report" message.
-func TestRun_ValidateReport_WriteErrorReturnsExit1(t *testing.T) {
+// with exit 3 (tool-crash I/O failure, NOT exit 1 validation-failure) and
+// a stderr "failed to create validation report" message.
+func TestRun_ValidateReport_WriteErrorReturnsExit3(t *testing.T) {
 	root := t.TempDir()
 	writeGoFile(t, root, "m.go", fullyAnnotatedMetric)
 	bad := filepath.Join(t.TempDir(), "does-not-exist", "report.json")
 
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"--source", root, "--validate", "--validation-report", bad}, &stdout, &stderr)
-	if code != 1 {
-		t.Fatalf("exit code: got %d, want 1 (stderr=%q)", code, stderr.String())
+	if code != 3 {
+		t.Fatalf("exit code: got %d, want 3 (stderr=%q)", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "validation report") {
 		t.Errorf("stderr missing 'validation report' phrase: %q", stderr.String())
@@ -1287,5 +1295,116 @@ func TestRun_ListRulesRowOrderMatchesRegistry(t *testing.T) {
 			t.Errorf("rule %q appears out of order (pos %d after %d)", r.ID(), pos, lastPos)
 		}
 		lastPos = pos
+	}
+}
+
+// TestRun_ValidationErrorReturnsExit1 pins the exit-1 contract under the
+// v0.3.1 taxonomy: a bare metric (missing @metric description + calculation)
+// triggers error-severity rules, so the CLI must exit 1 (validation failed),
+// NOT exit 3 (tool crashed). The TestRun_ValidateCatches* tests above also
+// assert code == 1, but this test exists as the canonical exit-1 pin after
+// the taxonomy split so future refactors can grep for it directly.
+func TestRun_ValidationErrorReturnsExit1(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "m.go", bareMetric)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--source", root, "--validate"}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit code: got %d, want 1 (validation failed, not tool crash); stderr=%q", code, stderr.String())
+	}
+	// Snapshot must still be written — validation failure does not block
+	// snapshot emission (the snapshot may well be the diagnostic artifact
+	// the CI pipeline uploads alongside the violation report).
+	if !strings.Contains(stdout.String(), `"schema_version"`) {
+		t.Errorf("stdout missing snapshot JSON (snapshot must be written even when validation fails): %q", stdout.String())
+	}
+}
+
+// TestRun_PipelineFailureReturnsExit3 pins the exit-3 contract: when the
+// pipeline itself cannot run (e.g. --source points at a non-existent path),
+// the CLI must exit 3 (tool crashed) rather than exit 1 (validation found
+// issues). This is the taxonomy's headline distinction — CI scripts need
+// to tell "your code has issues" from "the extractor is broken".
+func TestRun_PipelineFailureReturnsExit3(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	missing := filepath.Join(t.TempDir(), "nonexistent-pipeline-path")
+	code := run([]string{"--source", missing, "--validate"}, &stdout, &stderr)
+	if code != 3 {
+		t.Fatalf("exit code: got %d, want 3 (pipeline crash, not validation failure); stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "error:") {
+		t.Errorf("stderr missing 'error:' prefix: %q", stderr.String())
+	}
+}
+
+// failingWriter is an io.Writer whose Write always fails. Used to exercise
+// error branches that kick in when the CLI cannot flush its own output —
+// the only reliable way to reach those branches in-process.
+type failingWriter struct{}
+
+func (failingWriter) Write(p []byte) (int, error) { return 0, errors.New("broken pipe") }
+
+// TestRun_ListRulesWriteErrorReturnsExit3 — if printRuleList cannot write
+// to stdout (e.g. the pipe reader closed early), the CLI must treat that
+// as a tool-crash (exit 3), NOT as success or a usage error. Pins the
+// error branch inside the --list-rules short-circuit.
+func TestRun_ListRulesWriteErrorReturnsExit3(t *testing.T) {
+	var stderr bytes.Buffer
+	code := run([]string{"--list-rules"}, failingWriter{}, &stderr)
+	if code != 3 {
+		t.Fatalf("exit: got %d, want 3 (printRuleList I/O failure is a tool-crash); stderr=%q",
+			code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "failed to print rule list") {
+		t.Errorf("stderr missing 'failed to print rule list': %q", stderr.String())
+	}
+}
+
+// TestRun_StrictDoesNotAffectWithoutEnable — --strict with --validate but
+// without --enable-rule for an off-by-default warning rule must not change
+// the exit code. The off-by-default rule stays dormant, so no violations
+// exist to promote, so exit is 0. Guards the "strict only promotes
+// enabled warnings" semantics at the CLI boundary.
+func TestRun_StrictDoesNotAffectWithoutEnable(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "m.go", highCardMetric)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--source", root,
+		"--repo-root", root,
+		"--validate",
+		"--strict",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d, want 0 (no warning rules enabled → no violations to promote); stderr=%s",
+			code, stderr.String())
+	}
+}
+
+// TestRun_StrictPromotesWarningToExit1 — --strict must promote a warning-
+// severity violation to an error and drive exit 1. The high-cardinality
+// rule is enabled so it actually fires; without --strict it would be a
+// warning and exit would stay 0. This test is the canonical CLI-level
+// pin for the --strict promotion contract.
+func TestRun_StrictPromotesWarningToExit1(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "m.go", highCardMetric)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--source", root,
+		"--repo-root", root,
+		"--validate",
+		"--strict",
+		"--enable-rule", "metric.label-high-cardinality-hint",
+	}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("exit: got %d, want 1 (--strict should promote high-cardinality warning to error); stderr=%s",
+			code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "metric.label-high-cardinality-hint") {
+		t.Errorf("stderr missing rule ID: %s", stderr.String())
 	}
 }
