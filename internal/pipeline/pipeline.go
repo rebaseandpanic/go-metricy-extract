@@ -162,6 +162,12 @@ func Run(ctx context.Context, opts Options) (*Result, error) {
 			Version: opts.Version,
 		},
 		Metrics: metrics,
+		// Forward the collected extractor warnings into the snapshot so
+		// validation rules that inspect extraction diagnostics (e.g.
+		// metric.non-literal-metadata) can surface them. The field is
+		// excluded from JSON serialization, so the wire shape is
+		// unaffected.
+		ExtractionWarnings: warnings,
 	}
 
 	return &Result{

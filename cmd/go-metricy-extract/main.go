@@ -22,7 +22,14 @@ import (
 	"github.com/rebaseandpanic/go-metricy-extract/internal/validation/rules"
 )
 
-const version = "0.1.0-dev"
+// version is injected at release time via:
+//
+//	go build -ldflags "-X main.version=v0.2.0" ./cmd/go-metricy-extract
+//
+// For development builds (plain `go build` or `go run`), the default "dev"
+// is used. Declared as a var (not a const) because -ldflags -X can only
+// override package-level variables, not constants.
+var version = "dev"
 
 // repeatable is a flag.Value implementation backing every "--foo bar --foo baz"
 // CLI flag in this program. Keeping it a simple []string (rather than a map or
@@ -51,11 +58,6 @@ func (r *repeatable) Set(v string) error {
 // of which concrete rules exist.
 var allValidationRules = rules.All()
 
-// defaultOffRuleIDs is the set of rule IDs that require --enable-rule
-// to activate. Sourced from the rules package so the CLI and the
-// registry agree on default-off status.
-var defaultOffRuleIDs = rules.DefaultOffIDs()
-
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
@@ -80,6 +82,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		project  string
 		repoRoot string
 
+		listRules bool
+
 		validate             bool
 		strict               bool
 		skipRules            repeatable
@@ -89,11 +93,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		validationReport     string
 		minDescriptionLength int
 		ruleMinLength        repeatable
+		highCardLabels       string
 	)
 	fs.StringVar(&source, "source", "", "Path to the Go source directory to scan (required)")
 	fs.StringVar(&output, "output", "", "Output file path (defaults to stdout)")
 	fs.StringVar(&project, "project", "", "Project name written into the snapshot (defaults to basename of --source)")
 	fs.StringVar(&repoRoot, "repo-root", "", "Repository root for computing repo-relative source paths (defaults to auto-detect via .git/go.mod)")
+
+	// --list-rules is a pure discoverability flag: it prints the registered
+	// rules (id, severity, default on/off, description) and exits. Handled
+	// before --source validation so users can enumerate rules without
+	// pointing at a project.
+	fs.BoolVar(&listRules, "list-rules", false,
+		"Print the list of all validation rules with ID, severity, default on/off, and description; then exit.")
 
 	// Validation flags — wiring is present even before step 9 adds the rule
 	// registry, so `--validate` with an empty registry produces an empty,
@@ -108,13 +120,17 @@ func run(args []string, stdout, stderr io.Writer) int {
 	fs.StringVar(&validationReport, "validation-report", "", "Write validation report JSON to path (else stderr summary only)")
 	fs.IntVar(&minDescriptionLength, "min-description-length", 20, "Global default for min-length rule checks")
 	fs.Var(&ruleMinLength, "rule-min-length", "Per-rule min-length override 'RULE-ID:N' (repeatable)")
+	fs.StringVar(&highCardLabels, "high-cardinality-labels", "",
+		"Override default high-cardinality label patterns (comma-separated). "+
+			"When unset, the built-in list is used (user_id, email, ip, uuid, session_id, path, url, etc.).")
 
 	printUsage := func(w io.Writer) {
 		fmt.Fprintf(w, "go-metricy-extract %s\n\n", version)
 		fmt.Fprintf(w, "Usage: go-metricy-extract --source <dir> [--output <path>] [--project <name>] [--repo-root <dir>]\n")
 		fmt.Fprintf(w, "                         [--validate [--strict] [--skip-rule ID]... [--warn-rule ID]... [--error-rule ID]...\n")
 		fmt.Fprintf(w, "                          [--enable-rule ID]... [--validation-report PATH]\n")
-		fmt.Fprintf(w, "                          [--min-description-length N] [--rule-min-length ID:N]...]\n\n")
+		fmt.Fprintf(w, "                          [--min-description-length N] [--rule-min-length ID:N]...\n")
+		fmt.Fprintf(w, "                          [--high-cardinality-labels CSV]]\n\n")
 		fs.SetOutput(w)
 		fs.PrintDefaults()
 		fs.SetOutput(io.Discard)
@@ -133,10 +149,58 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
+	// --list-rules short-circuits BEFORE --source validation so users can
+	// enumerate rules without pointing at a project. Anything interactive
+	// with a local source tree is still reachable via the usual flag combo.
+	if listRules {
+		if err := printRuleList(stdout); err != nil {
+			fmt.Fprintf(stderr, "error: failed to print rule list: %s\n", err)
+			return 1
+		}
+		return 0
+	}
+
 	if source == "" {
 		fmt.Fprintln(stderr, "error: --source is required")
 		printUsage(stderr)
 		return 2
+	}
+
+	// `--min-description-length 0` is ambiguous: the internal default is
+	// 20, so the CLI stores 0 both when the user explicitly passes 0 and
+	// when they omit the flag entirely — we can't tell those apart from
+	// the value alone. fs.Visit walks only flags the user actually set,
+	// so we use it to detect the "explicit 0" case. In that case the
+	// global still falls through to the hardcoded per-rule defaults (see
+	// resolveMinLength), which is almost certainly NOT what the user
+	// expected. Point them at --rule-min-length, which accepts 0 as a
+	// genuine "disable this check" signal.
+	seenMinDescLength := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "min-description-length" {
+			seenMinDescLength = true
+		}
+	})
+	if seenMinDescLength && minDescriptionLength == 0 {
+		fmt.Fprintln(stderr, "warn: --min-description-length 0 is treated as 'unset' (falls back to per-rule defaults); use --rule-min-length <id>:0 to disable a specific check")
+	}
+
+	// UX safety net: the pattern override is only meaningful when the
+	// rule itself is activated via --enable-rule. Silently accepting an
+	// override with the rule off would let typos linger undetected ("why
+	// isn't my override firing?"). Point users at the right flag
+	// combination instead.
+	if highCardLabels != "" {
+		enabled := false
+		for _, r := range enableRules {
+			if r == "metric.label-high-cardinality-hint" {
+				enabled = true
+				break
+			}
+		}
+		if !enabled {
+			fmt.Fprintln(stderr, "warn: --high-cardinality-labels is set but metric.label-high-cardinality-hint is off; add --enable-rule metric.label-high-cardinality-hint to activate")
+		}
 	}
 
 	// Bind SIGINT/SIGTERM to the pipeline context so an interrupted walk exits
@@ -179,6 +243,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			strict,
 			minDescriptionLength,
 			ruleMinLength,
+			highCardLabels,
 		)
 		if !ok {
 			return 1
@@ -241,6 +306,7 @@ func runValidation(
 	strict bool,
 	minDescriptionLength int,
 	ruleMinLength repeatable,
+	highCardLabels string,
 ) (ok bool, hasError bool) {
 	// Warn on unknown rule IDs — typos here would silently do nothing, so
 	// surface them early. When the registry is empty (pre-step-9), every ID
@@ -292,16 +358,35 @@ func runValidation(
 		ruleMin[parts[0]] = n
 	}
 
+	// Parse --high-cardinality-labels. An empty flag value (not passed, or
+	// `--high-cardinality-labels=""`) leaves hcLabels at nil so the rule
+	// falls back to its built-in default. A non-empty value replaces the
+	// default entirely — a subsequent empty-after-trim value (e.g.
+	// "  ,  ") degenerates to nil, matching the "unset" semantics rather
+	// than silently disabling the rule.
+	var hcLabels []string
+	if highCardLabels != "" {
+		for _, s := range strings.Split(highCardLabels, ",") {
+			if trimmed := strings.TrimSpace(s); trimmed != "" {
+				hcLabels = append(hcLabels, trimmed)
+			}
+		}
+	}
+
 	valRes := validation.Run(snapshot, validation.Options{
-		Rules:            allValidationRules,
-		Skip:             toSet(skipRules),
-		Enable:           toSet(enableRules),
-		DefaultOff:       defaultOffRuleIDs,
+		Rules:  allValidationRules,
+		Skip:   toSet(skipRules),
+		Enable: toSet(enableRules),
+		// Build DefaultOff fresh on every call so each Run gets its own
+		// map instance. Cheap (~1 entry today) and defensively guards
+		// against accidental mutation by the engine.
+		DefaultOff:       rules.DefaultOffIDs(),
 		SeverityOverride: overrides,
 		Strict:           strict,
 		Context: validation.Context{
-			MinDescriptionLength: minDescriptionLength,
-			RuleMinLength:        ruleMin,
+			MinDescriptionLength:  minDescriptionLength,
+			RuleMinLength:         ruleMin,
+			HighCardinalityLabels: hcLabels,
 		},
 	})
 
@@ -335,6 +420,50 @@ func runValidation(
 		}
 	}
 	return true, false
+}
+
+// printRuleList prints a human-readable table of every registered
+// validation rule — ID, severity, default on/off state, description — to
+// w. Column widths are computed from the actual rule IDs so output stays
+// tidy regardless of future rule additions. Invoked by --list-rules.
+//
+// Returns the first write error encountered so callers can fail fast on
+// a broken stdout (e.g. closed pipe) rather than silently dropping rows.
+func printRuleList(w io.Writer) error {
+	all := allValidationRules
+	off := rules.DefaultOffIDs()
+
+	// Compute max ID width so the Severity/Default/Description columns
+	// line up no matter how long a future rule ID grows.
+	maxID := len("Rule ID")
+	for _, r := range all {
+		if n := len(r.ID()); n > maxID {
+			maxID = n
+		}
+	}
+
+	if _, err := fmt.Fprintf(w, "%-*s  %-8s  %-7s  %s\n", maxID, "Rule ID", "Severity", "Default", "Description"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "%s  %s  %s  %s\n",
+		strings.Repeat("-", maxID),
+		strings.Repeat("-", 8),
+		strings.Repeat("-", 7),
+		strings.Repeat("-", 40)); err != nil {
+		return err
+	}
+
+	for _, r := range all {
+		sev := r.DefaultSeverity().String()
+		def := "on"
+		if off[r.ID()] {
+			def = "off"
+		}
+		if _, err := fmt.Fprintf(w, "%-*s  %-8s  %-7s  %s\n", maxID, r.ID(), sev, def, r.Description()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // concatAll flattens multiple repeatable lists into one slice. Order is

@@ -145,4 +145,10 @@ type Context struct {
 	// RuleMinLength overrides MinDescriptionLength per rule ID. A value set
 	// here always wins over the global default.
 	RuleMinLength map[string]int
+	// HighCardinalityLabels is the set of label names flagged by
+	// metric.label-high-cardinality-hint. When nil, the rule uses its
+	// built-in default list (user_id, email, ip, ...); CLI sets this from
+	// --high-cardinality-labels to override. A non-nil empty slice is an
+	// explicit "no patterns" signal — the rule effectively does nothing.
+	HighCardinalityLabels []string
 }

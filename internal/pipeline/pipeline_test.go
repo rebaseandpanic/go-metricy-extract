@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -237,6 +238,44 @@ var X = prometheus.NewCounter(prometheus.CounterOpts{Name: "ok_total", Help: "ok
 	if len(res.Snapshot.Metrics) != 1 || res.Snapshot.Metrics[0].Name != "ok_total" {
 		t.Errorf("metrics: got %+v, want [ok_total]", res.Snapshot.Metrics)
 	}
+	// S9: parse-error warnings must also be mirrored onto Snapshot.ExtractionWarnings
+	// so validation rules that look at diagnostics see the same set the caller does.
+	if !reflect.DeepEqual(res.Snapshot.ExtractionWarnings, res.Warnings) {
+		t.Errorf("Snapshot.ExtractionWarnings must mirror Result.Warnings exactly;\n got: %v\nwant: %v",
+			res.Snapshot.ExtractionWarnings, res.Warnings)
+	}
+}
+
+// TestRun_ExtractionWarningsNilOnCleanFixture pins the contract that a
+// fully-annotated, well-formed fixture produces no extractor warnings and
+// therefore leaves Snapshot.ExtractionWarnings empty. Guards against a
+// regression where the pipeline injects stray diagnostics on clean input.
+func TestRun_ExtractionWarningsNilOnCleanFixture(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "metrics.go", `package p
+
+import "github.com/prometheus/client_golang/prometheus"
+
+// Clean, fully-literal metric — no warnings expected.
+// @metric description A fully-annotated counter.
+// @metric calculation Incremented in the test harness.
+var HttpRequests = prometheus.NewCounter(prometheus.CounterOpts{
+    Name: "http_requests_total",
+    Help: "Total HTTP requests",
+})
+`)
+
+	res, err := Run(context.Background(), Options{Source: root})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(res.Warnings) != 0 {
+		t.Errorf("Result.Warnings: got %v, want empty on clean fixture", res.Warnings)
+	}
+	if len(res.Snapshot.ExtractionWarnings) != 0 {
+		t.Errorf("Snapshot.ExtractionWarnings: got %v, want empty on clean fixture",
+			res.Snapshot.ExtractionWarnings)
+	}
 }
 
 func TestRun_SourceLocationFileIsRepoRelative(t *testing.T) {
@@ -380,6 +419,15 @@ var X = prometheus.NewCounter(prometheus.CounterOpts{Name: dynName, Help: "y"})
 	// Metric was skipped, so no metrics in the snapshot.
 	if len(res.Snapshot.Metrics) != 0 {
 		t.Errorf("metrics: got %d, want 0 (skipped)", len(res.Snapshot.Metrics))
+	}
+	// v0.2 stage 1: warnings must also be mirrored onto the snapshot so
+	// the metric.non-literal-metadata validation rule can surface them.
+	// The snapshot field is the pipeline → validation bridge; without
+	// this propagation the rule sees an empty list and silently
+	// produces no violations.
+	if !reflect.DeepEqual(res.Snapshot.ExtractionWarnings, res.Warnings) {
+		t.Errorf("Snapshot.ExtractionWarnings must mirror Result.Warnings:\n got: %v\nwant: %v",
+			res.Snapshot.ExtractionWarnings, res.Warnings)
 	}
 }
 

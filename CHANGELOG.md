@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-04-21
+
+- [FEATURE] Eight new validation rules bringing total to 15: four naming/convention checks (`metric.counter-total-suffix`, `metric.histogram-unit-suffix`, `metric.name-snake-case`, `metric.non-literal-metadata`), three min-length checks (`metric.description-min-length`, `metric.calculation-min-length`, `metric.label-description-min-length`), and one off-by-default high-cardinality hint (`metric.label-high-cardinality-hint`)
+- [FEATURE] `--list-rules` flag prints all registered validation rules with ID, severity, default on/off state, and description; exits 0 without requiring `--source`
+- [FEATURE] `--high-cardinality-labels` flag overrides the default high-cardinality label pattern list (comma-separated)
+- [FEATURE] `--min-description-length` and `--rule-min-length` flags are now consumed by the three new min-length rules (previously reserved/no-op)
+- [FEATURE] `--strict` flag is now useful: promotes all warning-severity rules to errors (previously no-op in v0.1 which had only error rules)
+- [UX] Version string is now build-time injectable via `-ldflags "-X main.version=v0.2.0"`; default is `"dev"` for unreleased builds
+- [UX] Stderr warning when `--high-cardinality-labels` is set but `metric.label-high-cardinality-hint` is not enabled
+- [UX] Stderr warning when `--min-description-length 0` is set (treated as "unset" sentinel)
+- [ARCHITECTURE] `Rule` registry now supports off-by-default rules via `validation.Options.DefaultOff`; engine skips such rules unless explicitly listed in `Options.Enable`
+- [ARCHITECTURE] `MetricSnapshot.ExtractionWarnings` field exposes pipeline/extractor warnings to validation rules without polluting the JSON wire shape (`json:"-"`)
+- [BUGFIX] Min-length rules count Unicode runes via `utf8.RuneCountInString`, not bytes — "processed 5 characters of Chinese input" is 5, not 15
+
 ## [0.1.0] - 2026-04-21
 
 Initial release.

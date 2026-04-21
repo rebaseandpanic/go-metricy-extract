@@ -21,6 +21,15 @@ type MetricSnapshot struct {
 	ExtractedAt   time.Time          `json:"extracted_at"`
 	Extractor     ExtractorInfo      `json:"extractor"`
 	Metrics       []MetricDescriptor `json:"metrics"`
+	// ExtractionWarnings mirrors the per-file warnings produced by the
+	// extractor/pipeline (non-literal metric metadata, malformed labels,
+	// etc.). It is intentionally **not** serialized: the snapshot's JSON
+	// wire shape must stay stable for downstream consumers. Validation
+	// rules that inspect extraction diagnostics (e.g.
+	// metric.non-literal-metadata) read from this field. The field is
+	// populated by the pipeline; direct callers that construct snapshots
+	// for tests may leave it nil.
+	ExtractionWarnings []string `json:"-"`
 }
 
 // extractedAtLayout is the wire format for MetricSnapshot.ExtractedAt.

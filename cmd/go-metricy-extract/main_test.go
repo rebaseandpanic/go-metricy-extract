@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/rebaseandpanic/go-metricy-extract/internal/validation/rules"
 )
 
 // writeGoFile writes content to <dir>/<name>, creating parent dirs as needed.
@@ -493,6 +495,52 @@ func TestRun_RuleMinLengthValidSilent(t *testing.T) {
 	}
 }
 
+// TestRun_MinDescriptionLengthZeroEmitsWarning — user-supplied
+// `--min-description-length 0` is ambiguous (matches the default), so
+// the CLI must surface a stderr warning pointing at the right path
+// (`--rule-min-length <id>:0`). Exit code stays 0 because the metric
+// is fully annotated and nothing else fires. Catches both the
+// "warning is missing" regression and the "fs.Visit never fires"
+// regression (which would mean we can't detect explicit 0 at all).
+func TestRun_MinDescriptionLengthZeroEmitsWarning(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "m.go", fullyAnnotatedMetric)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--source", root,
+		"--validate",
+		"--min-description-length", "0",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "min-description-length 0 is treated as 'unset'") {
+		t.Errorf("stderr missing 'min-description-length 0 is treated as unset' warning: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--rule-min-length") {
+		t.Errorf("stderr missing pointer to --rule-min-length: %q", stderr.String())
+	}
+}
+
+// TestRun_MinDescriptionLengthUnsetNoWarning — omitting the flag
+// entirely must NOT trigger the zero-warning (fs.Visit must only fire
+// on flags actually passed by the user). Negative counterpart to
+// TestRun_MinDescriptionLengthZeroEmitsWarning.
+func TestRun_MinDescriptionLengthUnsetNoWarning(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "m.go", fullyAnnotatedMetric)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--source", root, "--validate"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "min-description-length 0 is treated as 'unset'") {
+		t.Errorf("stderr unexpectedly emits zero-warning when flag not passed: %q", stderr.String())
+	}
+}
+
 // TestRun_ValidateReport_WriteErrorReturnsExit1 — when --validation-report
 // points at a path whose parent dir does not exist, the CLI must fail fast
 // with exit 1 and a stderr "failed to create validation report" message.
@@ -733,6 +781,232 @@ func TestRun_ValidateWarnRuleDemotesToWarning(t *testing.T) {
 	}
 }
 
+// highCardMetric is a *Vec metric whose label names (user_id) exactly
+// match a pattern in the built-in high-cardinality list. Otherwise
+// fully annotated so only the high-cardinality-hint rule fires when
+// enabled.
+const highCardMetric = `package p
+import "github.com/prometheus/client_golang/prometheus"
+
+// X counts things per user.
+//
+// @metric description Counts the total number of requests per user id.
+// @metric calculation Incremented once per successful request handler invocation.
+// @label user_id Identifier of the requesting user.
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x_total", Help: "x"}, []string{"user_id"})
+`
+
+// tenantCardMetric is the override-test fixture: label name is
+// "tenant_id" which is NOT in the built-in default list, so only a CLI
+// override can surface it.
+const tenantCardMetric = `package p
+import "github.com/prometheus/client_golang/prometheus"
+
+// X counts things per tenant.
+//
+// @metric description Counts the total number of requests per tenant id.
+// @metric calculation Incremented once per successful request handler invocation.
+// @label tenant_id Identifier of the requesting tenant.
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x_total", Help: "x"}, []string{"tenant_id"})
+`
+
+// TestRun_HighCardinalityRuleOffByDefault — with --validate but WITHOUT
+// --enable-rule, the high-cardinality-hint rule stays silent even when
+// the snapshot has a user_id label. Proves the rule is default-off.
+func TestRun_HighCardinalityRuleOffByDefault(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "m.go", highCardMetric)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--source", root, "--validate"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "metric.label-high-cardinality-hint") {
+		t.Errorf("stderr unexpectedly mentions off-by-default rule: %q", stderr.String())
+	}
+}
+
+// TestRun_HighCardinalityRuleEnabled — --enable-rule activates the
+// rule; a user_id label fires it. Exit stays 0 (warning-severity).
+func TestRun_HighCardinalityRuleEnabled(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "m.go", highCardMetric)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--source", root,
+		"--validate",
+		"--enable-rule", "metric.label-high-cardinality-hint",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (warning severity); stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "metric.label-high-cardinality-hint") {
+		t.Errorf("stderr missing enabled rule: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "user_id") {
+		t.Errorf("stderr missing label name 'user_id': %q", stderr.String())
+	}
+}
+
+// TestRun_HighCardinalityLabelsOverride — user overrides the default
+// list via --high-cardinality-labels. tenant_id (NOT in the default
+// list) fires, user_id (in the default list) does not.
+func TestRun_HighCardinalityLabelsOverride(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "m.go", tenantCardMetric)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--source", root,
+		"--validate",
+		"--enable-rule", "metric.label-high-cardinality-hint",
+		"--high-cardinality-labels", "tenant_id,something_else",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "metric.label-high-cardinality-hint") {
+		t.Errorf("stderr missing rule id: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "tenant_id") {
+		t.Errorf("stderr missing overridden label 'tenant_id': %q", stderr.String())
+	}
+}
+
+// trimmedCardMetric exercises whitespace handling in the CSV parser —
+// the label name is "trimmed_label" (no spaces), but the CLI fixture
+// passes the override with surrounding whitespace on every element.
+const trimmedCardMetric = `package p
+import "github.com/prometheus/client_golang/prometheus"
+
+// X counts things per trimmed label.
+//
+// @metric description Counts the total number of requests per trimmed label.
+// @metric calculation Incremented once per successful request handler invocation.
+// @label trimmed_label Identifier used to exercise CSV whitespace trimming.
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x_total", Help: "x"}, []string{"trimmed_label"})
+`
+
+// myLabelCardMetric is used by the empty-elements-dropped test: a
+// single "my_label" label that only fires when the override CSV parser
+// correctly discards empty entries.
+const myLabelCardMetric = `package p
+import "github.com/prometheus/client_golang/prometheus"
+
+// X counts things per my_label.
+//
+// @metric description Counts the total number of requests per my_label.
+// @metric calculation Incremented once per successful request handler invocation.
+// @label my_label Identifier used to exercise empty-element skipping in CSV.
+var X = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "x_total", Help: "x"}, []string{"my_label"})
+`
+
+// TestRun_HighCardinalityLabelsWhitespaceTrimmed — the CSV parser must
+// strip surrounding whitespace on every element, so a flag value like
+// "  other_label  ,  trimmed_label  ,  another  " still matches a
+// label literally named "trimmed_label". Pins the trim contract at the
+// CLI boundary (unit-level trim is covered, but users interact with
+// the CLI).
+func TestRun_HighCardinalityLabelsWhitespaceTrimmed(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "m.go", trimmedCardMetric)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--source", root,
+		"--validate",
+		"--enable-rule", "metric.label-high-cardinality-hint",
+		"--high-cardinality-labels", "  other_label  ,  trimmed_label  ,  another  ",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "metric.label-high-cardinality-hint") {
+		t.Errorf("stderr missing rule id (whitespace-trimmed override should still fire): %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "trimmed_label") {
+		t.Errorf("stderr missing label name 'trimmed_label' (trim contract broken?): %q", stderr.String())
+	}
+}
+
+// TestRun_HighCardinalityLabelsEmptyElementsDropped — a CSV with empty
+// entries (leading, trailing, interleaved, whitespace-only) must drop
+// those entries without degenerating the whole override to nil. The
+// single real entry "my_label" still triggers a violation.
+func TestRun_HighCardinalityLabelsEmptyElementsDropped(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "m.go", myLabelCardMetric)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--source", root,
+		"--validate",
+		"--enable-rule", "metric.label-high-cardinality-hint",
+		"--high-cardinality-labels", ",,  ,my_label,,  ,",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "metric.label-high-cardinality-hint") {
+		t.Errorf("stderr missing rule id (empty-elements CSV should still carry my_label): %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "my_label") {
+		t.Errorf("stderr missing label name 'my_label': %q", stderr.String())
+	}
+}
+
+// TestRun_HighCardinalityLabelsWithoutEnableWarns — passing
+// --high-cardinality-labels without also enabling the rule is a common
+// footgun (typo / copy-paste error). The CLI must surface a stderr
+// warning pointing at --enable-rule so the user notices before the
+// override silently does nothing.
+func TestRun_HighCardinalityLabelsWithoutEnableWarns(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "m.go", fullyAnnotatedMetric)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--source", root,
+		"--validate",
+		"--high-cardinality-labels", "foo",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--high-cardinality-labels is set but") {
+		t.Errorf("stderr missing footgun warning prefix: %q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "metric.label-high-cardinality-hint is off") {
+		t.Errorf("stderr missing 'metric.label-high-cardinality-hint is off' phrase: %q", stderr.String())
+	}
+}
+
+// TestRun_HighCardinalityLabelsEmptyOverride — `--high-cardinality-labels=""`
+// is treated as "unset" (empty string leaves the slice at nil), so the
+// built-in default list is used and user_id still fires. Pins the CLI
+// contract: an empty flag value != an explicit no-patterns signal.
+func TestRun_HighCardinalityLabelsEmptyOverride(t *testing.T) {
+	root := t.TempDir()
+	writeGoFile(t, root, "m.go", highCardMetric)
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{
+		"--source", root,
+		"--validate",
+		"--enable-rule", "metric.label-high-cardinality-hint",
+		"--high-cardinality-labels", "",
+	}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	// Empty override behaves like "unset" — defaults apply, user_id fires.
+	if !strings.Contains(stderr.String(), "metric.label-high-cardinality-hint") {
+		t.Errorf("stderr missing rule id (empty override should fall back to defaults): %q", stderr.String())
+	}
+}
+
 // TestRun_ValidateReport_ContainsViolations — the JSON report file must
 // carry the violation records with correct RuleID fields when rules fire.
 func TestRun_ValidateReport_ContainsViolations(t *testing.T) {
@@ -787,5 +1061,231 @@ func TestRun_ValidateReport_ContainsViolations(t *testing.T) {
 		if !seen {
 			t.Errorf("report missing violation with rule_id=%q; violations=%+v", id, rep.Violations)
 		}
+	}
+}
+
+// TestRun_ListRulesExit0 — --list-rules prints a non-empty rule table and
+// exits 0. Also proves every column header is present, stderr stays empty
+// (pure discoverability command — no diagnostics), and at least a handful
+// of known rule IDs show up, so a completely empty registry or a silent
+// early-return would be caught here.
+func TestRun_ListRulesExit0(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--list-rules"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	out := stdout.String()
+	if out == "" {
+		t.Fatalf("stdout is empty; expected rule table")
+	}
+	for _, header := range []string{"Rule ID", "Severity", "Default", "Description"} {
+		if !strings.Contains(out, header) {
+			t.Errorf("stdout must contain header %q; stdout:\n%s", header, out)
+		}
+	}
+	for _, id := range []string{
+		"metric.name-required",
+		"metric.help-required",
+		"metric.description-required",
+		"metric.duplicate-name",
+		"metric.label-high-cardinality-hint",
+	} {
+		if !strings.Contains(out, id) {
+			t.Errorf("stdout missing expected rule id %q: %q", id, out)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("--list-rules must write nothing to stderr; got:\n%s", stderr.String())
+	}
+}
+
+// TestRun_ListRulesWithoutSource — --list-rules must succeed even when
+// --source is not provided. Enumeration is independent of project layout
+// (pure registry dump), so the normal "--source is required" guard must
+// not fire before --list-rules is checked.
+func TestRun_ListRulesWithoutSource(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--list-rules"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "--source is required") {
+		t.Errorf("stderr unexpectedly emits source-required error: %q", stderr.String())
+	}
+}
+
+// TestRun_ListRulesShowsAllRegistered — every rule returned by rules.All()
+// must appear in the --list-rules output. Pins the registry-to-CLI
+// contract: a newly registered rule is automatically visible without
+// needing to update the CLI formatter.
+func TestRun_ListRulesShowsAllRegistered(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--list-rules"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, r := range rules.All() {
+		if !strings.Contains(out, r.ID()) {
+			t.Errorf("stdout missing rule id %q: %q", r.ID(), out)
+		}
+	}
+}
+
+// TestRun_ListRulesShowsSeverity — the severity column must render both
+// "error" and "warning" strings when the registry includes rules of each
+// kind (which it does today: 7 errors + 8 warnings). A broken String()
+// method on Severity would collapse both to the same text.
+func TestRun_ListRulesShowsSeverity(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--list-rules"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "error") {
+		t.Errorf("stdout missing 'error' severity: %q", out)
+	}
+	if !strings.Contains(out, "warning") {
+		t.Errorf("stdout missing 'warning' severity: %q", out)
+	}
+}
+
+// TestRun_ListRulesShowsDefaultOffOn — the Default column must render
+// both "on" and "off" values when the registry has at least one default-
+// off rule. Guards against the formatter silently emitting only "on" for
+// every rule (e.g. if DefaultOffIDs lookup is misapplied).
+func TestRun_ListRulesShowsDefaultOffOn(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--list-rules"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "on") {
+		t.Errorf("stdout missing 'on' default marker: %q", out)
+	}
+	if !strings.Contains(out, "off") {
+		t.Errorf("stdout missing 'off' default marker (expected for high-cardinality-hint): %q", out)
+	}
+	// Sanity: the off-by-default rule must render with "off", not "on".
+	// The line for that rule carries the ID plus "off" somewhere after it.
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "metric.label-high-cardinality-hint") {
+			if !strings.Contains(line, "off") {
+				t.Errorf("high-cardinality-hint line missing 'off' marker: %q", line)
+			}
+		}
+	}
+}
+
+// TestRun_VersionInjectionViaVarRoundTrips — compile-time guard: `version`
+// must be a var, not a const, so that `-ldflags "-X main.version=..."` can
+// override it at release time. If this file fails to compile after someone
+// changes version to a const, that's the regression caught here (the
+// assignment below would be a compile error on a const); the round-trip
+// through -h also proves the injected value reaches the usage banner.
+func TestRun_VersionInjectionViaVarRoundTrips(t *testing.T) {
+	orig := version
+	defer func() { version = orig }()
+	version = "test-injected"
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"-h"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit code: got %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "test-injected") {
+		t.Errorf("help output missing injected version; stdout:\n%s", stdout.String())
+	}
+}
+
+// TestRun_ListRulesIgnoresOutputFlag — --list-rules is a terminal
+// discoverability command and must short-circuit before any pipeline
+// work, including --output file emission. Pairing the two is almost
+// always a user mistake; the CLI silently drops --output in that case,
+// which this test pins.
+func TestRun_ListRulesIgnoresOutputFlag(t *testing.T) {
+	tmpDir := t.TempDir()
+	outPath := filepath.Join(tmpDir, "rules.json")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--list-rules", "--output", outPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if _, err := os.Stat(outPath); !os.IsNotExist(err) {
+		t.Errorf("--output file must NOT be created when --list-rules is used; got stat err: %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Rule ID") {
+		t.Errorf("list-rules output missing from stdout")
+	}
+}
+
+// TestRun_ListRulesIgnoresValidateFlag — --list-rules must ignore
+// --validate and --strict entirely (no rule engine invocation, no
+// summary noise on stderr). Pins the short-circuit order: list-rules
+// fires before any validation wiring.
+func TestRun_ListRulesIgnoresValidateFlag(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--list-rules", "--validate", "--strict"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Rule ID") {
+		t.Errorf("list-rules output missing from stdout")
+	}
+	if stderr.Len() != 0 {
+		t.Errorf("stderr must be empty; got:\n%s", stderr.String())
+	}
+}
+
+// TestRun_ListRulesShowsFullDescription — the Description column must
+// not be truncated. metric.histogram-unit-suffix carries a dynamic
+// description built from all 13 recognised unit suffixes; if the
+// formatter ever clips the last column (e.g. naive fixed-width
+// formatting), the trailing suffixes would disappear from the output.
+func TestRun_ListRulesShowsFullDescription(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--list-rules"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d, want 0; stderr=%s", code, stderr.String())
+	}
+	longMarkers := []string{
+		"_seconds", "_milliseconds", "_microseconds", "_nanoseconds",
+		"_bytes", "_kilobytes", "_megabytes",
+		"_ratio", "_percent", "_fraction",
+		"_bits", "_celsius", "_meters",
+	}
+	out := stdout.String()
+	for _, marker := range longMarkers {
+		if !strings.Contains(out, marker) {
+			t.Errorf("description for histogram rule appears truncated; missing %q", marker)
+		}
+	}
+}
+
+// TestRun_ListRulesRowOrderMatchesRegistry — rows must appear in the
+// order produced by rules.All(). A reordering (e.g. accidental map
+// iteration) would make the CLI output non-deterministic and break
+// downstream diffing; this test pins the registry → stdout ordering.
+func TestRun_ListRulesRowOrderMatchesRegistry(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"--list-rules"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit: got %d, want 0; stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	lastPos := -1
+	for _, r := range rules.All() {
+		pos := strings.Index(out, r.ID())
+		if pos == -1 {
+			t.Errorf("rule %q missing from stdout", r.ID())
+			continue
+		}
+		if pos <= lastPos {
+			t.Errorf("rule %q appears out of order (pos %d after %d)", r.ID(), pos, lastPos)
+		}
+		lastPos = pos
 	}
 }

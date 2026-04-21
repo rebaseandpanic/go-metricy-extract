@@ -67,7 +67,7 @@ var HttpRequests = prometheus.NewCounterVec(
   "schema_version": "1.0",
   "project": "mysvc",
   "extracted_at": "2026-04-20T10:00:00Z",
-  "extractor": { "name": "go-metricy-extract", "version": "0.1.0" },
+  "extractor": { "name": "go-metricy-extract", "version": "0.2.0" },
   "metrics": [
     {
       "name": "http_requests_total",
@@ -102,7 +102,7 @@ Three directives, each on its own line inside a doc comment attached to the metr
 
 Conventions — influenced by [`swaggo/swag`](https://github.com/swaggo/swag), which uses the same `@verb key value` style in Go doc comments:
 
-- One directive per line. Multi-line values are not supported in v0.1 — continuation lines are silently dropped.
+- One directive per line. Multi-line values are not supported — continuation lines are silently dropped.
 - Directives are case-sensitive. `@Metric` is ignored.
 - Duplicate `@metric description` or `@metric calculation` emits a warning to stderr and overwrites the previous value.
 - Unknown `@tags` (for example `@api`, `@param`, `@deprecated`) are silently skipped so they can coexist with other tooling.
@@ -116,28 +116,43 @@ Conventions — influenced by [`swaggo/swag`](https://github.com/swaggo/swag), w
 | `--project <name>` | no | basename of `--source` | Project name written into the snapshot. |
 | `--repo-root <dir>` | no | auto-detect | Repository root for computing repo-relative paths in `source_location.file`. Walks up from `--source` looking for `.git` or `go.mod`. |
 | `--validate` | no | off | Enable validation against built-in rules. Any error-severity violation returns exit 1. |
-| `--strict` | no | off | Treat warnings as errors (CI-strict mode). No-op in v0.1 — all rules are error-severity. |
+| `--strict` | no | off | Treat warnings as errors (CI-strict mode). Any warning-severity violation becomes an error and returns exit 1. |
 | `--skip-rule <id>` | no | — | Disable a rule by ID. Repeatable. Unknown IDs print a warning to stderr. |
 | `--warn-rule <id>` | no | — | Demote a rule from error to warning. Repeatable. |
 | `--error-rule <id>` | no | — | Promote a rule from warning to error. Repeatable. Wins over `--warn-rule` on conflict. |
-| `--enable-rule <id>` | no | — | Enable an off-by-default rule. Repeatable. No-op in v0.1 — reserved for future rules. |
+| `--enable-rule <id>` | no | — | Enable an off-by-default rule. Repeatable. |
 | `--validation-report <path>` | no | stderr summary | Write a machine-readable JSON report to this path. Without it, a short summary is written to stderr. |
-| `--min-description-length <N>` | no | `20` | Global minimum length for description/calculation length rules. Reserved for v0.2 — no current rule consumes it. |
-| `--rule-min-length <id>:<N>` | no | — | Per-rule minimum-length override. Repeatable. Reserved for v0.2. |
+| `--min-description-length <N>` | no | `20` | Global minimum length for description/calculation/label min-length rules. Counted in Unicode runes. Setting `0` prints a stderr warning and is treated as "unset". |
+| `--rule-min-length <id>:<N>` | no | — | Per-rule minimum-length override, e.g. `--rule-min-length metric.label-description-min-length:5`. Repeatable. Wins over `--min-description-length`. |
+| `--high-cardinality-labels <csv>` | no | built-in list | Override default high-cardinality label patterns for `metric.label-high-cardinality-hint` (comma-separated, e.g. `tenant_id,device_id`). Setting this without `--enable-rule metric.label-high-cardinality-hint` prints a stderr warning — the rule is off by default. |
+| `--list-rules` | no | off | Print all validation rules (ID, severity, default on/off, description) and exit 0. Does not require `--source`. |
 
 ## Validation
 
-Running `--validate` checks the snapshot against **7 built-in rules** — all error-severity in v0.1. Any error-severity violation returns exit 1.
+Running `--validate` checks the snapshot against **15 built-in rules** — 7 errors + 7 warnings on by default + 1 warning off by default. Any error-severity violation returns exit 1. Warnings do not affect the exit code unless `--strict` is set.
 
-| Rule ID | Severity | Description |
-|---------|----------|-------------|
-| `metric.name-required` | Error | Metric name must be a non-empty string. |
-| `metric.help-required` | Error | Metric help text must be a non-empty string. |
-| `metric.description-required` | Error | `@metric description` annotation must be set. |
-| `metric.calculation-required` | Error | `@metric calculation` annotation must be set. |
-| `metric.label-description-required` | Error | Every declared label must have an `@label <name> <description>` annotation. |
-| `metric.duplicate-name` | Error | The same metric name must not appear more than once in the snapshot. |
-| `metric.type-consistency` | Error | The same metric name must not be registered with two different types. |
+| Rule ID | Severity | Default | Description |
+|---------|----------|---------|-------------|
+| `metric.name-required` | error | on | Metric name must be a non-empty string |
+| `metric.help-required` | error | on | Metric help text must be a non-empty string |
+| `metric.description-required` | error | on | Annotation description must be set |
+| `metric.calculation-required` | error | on | Annotation calculation must be set |
+| `metric.label-description-required` | error | on | Every declared label must have a description annotation |
+| `metric.duplicate-name` | error | on | Metric name must not appear more than once |
+| `metric.type-consistency` | error | on | Same metric name must not be registered with two different types |
+| `metric.counter-total-suffix` | warning | on | Counter metric names must end with `_total` |
+| `metric.histogram-unit-suffix` | warning | on | Histogram names must end with a unit suffix (`_seconds`, `_bytes`, `_ratio`, ...) |
+| `metric.name-snake-case` | warning | on | Metric name must be snake_case |
+| `metric.non-literal-metadata` | warning | on | Metric name or help is computed at runtime and was silently dropped |
+| `metric.description-min-length` | warning | on | Annotation description must be at least N characters (default 20) |
+| `metric.calculation-min-length` | warning | on | Annotation calculation must be at least N characters (default 20) |
+| `metric.label-description-min-length` | warning | on | Label description must be at least N characters (default 10) |
+| `metric.label-high-cardinality-hint` | warning | **off** | Label name matches a known high-cardinality pattern (`user_id`, `email`, `ip`, ...) |
+
+Rules marked **off** are not run by default. Enable them with `--enable-rule <id>`.
+
+Run `go-metricy-extract --list-rules` at any time to print this list from the
+installed binary — includes the current severity/default state.
 
 ### Typical CI usage
 
@@ -145,11 +160,31 @@ Running `--validate` checks the snapshot against **7 built-in rules** — all er
 # Block on errors (default validation mode)
 go-metricy-extract --source ./service --validate
 
+# Strict mode: treat all warnings as errors
+go-metricy-extract --source ./service --validate --strict
+
 # Skip a noisy rule
 go-metricy-extract --source ./service --validate --skip-rule metric.calculation-required
 
 # Demote a rule from error to warning
 go-metricy-extract --source ./service --validate --warn-rule metric.label-description-required
+
+# Enable high-cardinality label detection (off by default)
+go-metricy-extract --source ./service --validate \
+  --enable-rule metric.label-high-cardinality-hint
+
+# Customize the high-cardinality label list
+go-metricy-extract --source ./service --validate \
+  --enable-rule metric.label-high-cardinality-hint \
+  --high-cardinality-labels tenant_id,workspace_id,device_id
+
+# Tune min-length rules (global + per-rule override)
+go-metricy-extract --source ./service --validate \
+  --min-description-length 30 \
+  --rule-min-length metric.label-description-min-length:5
+
+# Discover all available rules (no --source required)
+go-metricy-extract --list-rules
 
 # Write machine-readable JSON report for agent-driven autofix
 go-metricy-extract --source ./service --validate --validation-report report.json
@@ -195,7 +230,7 @@ Example snapshot fragment:
   "extracted_at": "2026-04-20T10:00:00Z",
   "extractor": {
     "name": "go-metricy-extract",
-    "version": "0.1.0"
+    "version": "0.2.0"
   },
   "metrics": [
     {
@@ -236,12 +271,12 @@ Example snapshot fragment:
 
 | Pattern | Limitation |
 |---------|------------|
-| `promauto.With(reg).NewX(...)` | Not supported in v0.1. Silently skipped. Planned for v0.2. |
+| `promauto.With(reg).NewX(...)` | Not yet supported. Silently skipped. |
 | Dot-import `import . "prometheus"` + bare `NewCounter(...)` | Not recognized. Use the `prometheus.` or `promauto.` receiver prefix. |
 | `NewCounter(opts)` where `opts` is a variable | Config cannot be resolved statically. Emits a warning to stderr and skips the metric. |
 | Non-literal `Name` or `Help` (computed at runtime) | Static analysis reads string literals only. Emits a warning to stderr and skips the metric. |
 | Label names from variables or `[]string{...}` with non-literal elements | Non-literal labels are dropped with a warning; the metric is still emitted with the remaining literal labels. |
-| Multi-line `@metric description` | Not supported in v0.1. Continuation lines are silently dropped. |
+| Multi-line `@metric description` | Not supported. Continuation lines are silently dropped. |
 | System metrics (`expvar`, `runtime/metrics`, `go.opentelemetry.io/otel/metric`) | Not supported. Only `prometheus/client_golang` `New*` factory calls are recognized. |
 
 ## Dependencies

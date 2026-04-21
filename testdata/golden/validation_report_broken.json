@@ -2,6 +2,17 @@
   "schema_version": "1.0",
   "violations": [
     {
+      "rule_id": "metric.calculation-min-length",
+      "severity": "warning",
+      "message": "metric \"duplicated_metric\" calculation is 19 characters, minimum is 20",
+      "location": {
+        "metric_name": "duplicated_metric",
+        "file": "main.go",
+        "line": 25,
+        "member_name": "DuplicateB"
+      }
+    },
+    {
       "rule_id": "metric.calculation-required",
       "severity": "error",
       "message": "metric \"bare_counter_total\" has no calculation annotation (@metric calculation)",
@@ -10,6 +21,17 @@
         "file": "main.go",
         "line": 9,
         "member_name": "BareCounterNoAnnotations"
+      }
+    },
+    {
+      "rule_id": "metric.counter-total-suffix",
+      "severity": "warning",
+      "message": "counter metric \"duplicated_metric\" should end with _total suffix",
+      "location": {
+        "metric_name": "duplicated_metric",
+        "file": "main.go",
+        "line": 25,
+        "member_name": "DuplicateB"
       }
     },
     {
@@ -47,5 +69,5 @@
     }
   ],
   "error_count": 4,
-  "warning_count": 0
+  "warning_count": 2
 }

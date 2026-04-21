@@ -535,6 +535,46 @@ func TestSortMetrics_NonASCIIByteOrder(t *testing.T) {
 	}
 }
 
+func TestMetricSnapshot_JSON_ExtractionWarningsNotSerialized(t *testing.T) {
+	snap := MetricSnapshot{
+		SchemaVersion: "1.0",
+		Project:       "p",
+		Metrics:       []MetricDescriptor{},
+		ExtractionWarnings: []string{
+			"X: non-literal Name; skipping metric",
+			"Y: parse error: ...",
+		},
+	}
+	got, err := json.Marshal(snap)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if bytes.Contains(got, []byte("extraction_warnings")) {
+		t.Errorf("extraction_warnings leaked into JSON: %s", got)
+	}
+	if bytes.Contains(got, []byte("ExtractionWarnings")) {
+		t.Errorf("ExtractionWarnings leaked into JSON: %s", got)
+	}
+	if bytes.Contains(got, []byte("non-literal Name")) {
+		t.Errorf("warning content leaked into JSON: %s", got)
+	}
+}
+
+func TestMetricSnapshot_JSON_UnmarshalExtractionWarningsIgnored(t *testing.T) {
+	raw := []byte(`{
+        "schema_version":"1.0","project":"p","extracted_at":"2026-01-01T00:00:00Z",
+        "extractor":{"name":"x","version":"y"},"metrics":[],
+        "extraction_warnings":["should","not","appear"]
+    }`)
+	var snap MetricSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(snap.ExtractionWarnings) != 0 {
+		t.Errorf("ExtractionWarnings populated from JSON: %v", snap.ExtractionWarnings)
+	}
+}
+
 func TestMetricSnapshot_JSON_ExplicitEmptyMetrics(t *testing.T) {
 	// Explicit empty and nil must produce byte-identical JSON, both with "metrics":[].
 	base := func() MetricSnapshot {
