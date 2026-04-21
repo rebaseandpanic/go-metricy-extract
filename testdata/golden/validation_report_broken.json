@@ -1,0 +1,51 @@
+{
+  "schema_version": "1.0",
+  "violations": [
+    {
+      "rule_id": "metric.calculation-required",
+      "severity": "error",
+      "message": "metric \"bare_counter_total\" has no calculation annotation (@metric calculation)",
+      "location": {
+        "metric_name": "bare_counter_total",
+        "file": "main.go",
+        "line": 9,
+        "member_name": "BareCounterNoAnnotations"
+      }
+    },
+    {
+      "rule_id": "metric.description-required",
+      "severity": "error",
+      "message": "metric \"bare_counter_total\" has no description annotation (@metric description)",
+      "location": {
+        "metric_name": "bare_counter_total",
+        "file": "main.go",
+        "line": 9,
+        "member_name": "BareCounterNoAnnotations"
+      }
+    },
+    {
+      "rule_id": "metric.duplicate-name",
+      "severity": "error",
+      "message": "metric name \"duplicated_metric\" appears 2 times",
+      "location": {
+        "metric_name": "duplicated_metric",
+        "file": "main.go",
+        "line": 25,
+        "member_name": "DuplicateB"
+      }
+    },
+    {
+      "rule_id": "metric.type-consistency",
+      "severity": "error",
+      "message": "metric name \"duplicated_metric\" declared with conflicting types: counter, gauge",
+      "location": {
+        "metric_name": "duplicated_metric",
+        "file": "main.go",
+        "line": 25,
+        "member_name": "DuplicateB"
+      }
+    }
+  ],
+  "error_count": 4,
+  "warning_count": 0
+}

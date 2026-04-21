@@ -1,0 +1,199 @@
+{
+  "schema_version": "1.0",
+  "project": "sample-service",
+  "extracted_at": "2026-04-20T10:00:00Z",
+  "extractor": {
+    "name": "go-metricy-extract",
+    "version": "0.1.0-dev"
+  },
+  "metrics": [
+    {
+      "name": "active_connections",
+      "type": "gauge",
+      "help": "Number of active connections",
+      "description": "Number of currently active client connections.",
+      "calculation": "Incremented on connect, decremented on disconnect.",
+      "labels": [],
+      "source_location": {
+        "file": "main.go",
+        "line": 35,
+        "class": null,
+        "member": "ActiveConnections"
+      }
+    },
+    {
+      "name": "bytes_processed_total",
+      "type": "counter",
+      "help": "Total bytes processed",
+      "description": "Total bytes processed across all connections.",
+      "calculation": "Incremented in Read/Write methods with payload length.",
+      "labels": [
+        {
+          "name": "direction",
+          "description": "Either \"in\" or \"out\""
+        }
+      ],
+      "source_location": {
+        "file": "middleware/metrics.go",
+        "line": 11,
+        "class": null,
+        "member": "BytesProcessed"
+      }
+    },
+    {
+      "name": "cache_hit_ratio",
+      "type": "summary",
+      "help": "Cache hit ratio (running summary)",
+      "description": "Running summary of cache hit ratio observed over the last 1m window.",
+      "calculation": "Observed in Cache.Get/Set hooks with hit=1 or miss=0.",
+      "labels": [],
+      "source_location": {
+        "file": "main.go",
+        "line": 85,
+        "class": null,
+        "member": "CacheHitsRatio"
+      }
+    },
+    {
+      "name": "errors_total",
+      "type": "counter",
+      "help": "Total errors across all handlers",
+      "description": "Total unrecoverable errors emitted by any handler.",
+      "calculation": "Incremented whenever a handler returns an error result.",
+      "labels": [],
+      "source_location": {
+        "file": "main.go",
+        "line": 57,
+        "class": null,
+        "member": "TotalErrors"
+      }
+    },
+    {
+      "name": "http_request_duration_seconds",
+      "type": "histogram",
+      "help": "HTTP request duration",
+      "description": "HTTP request duration in seconds.",
+      "calculation": "Observed in LoggingMiddleware after downstream returns.",
+      "labels": [
+        {
+          "name": "endpoint",
+          "description": "Route template of the matched endpoint"
+        }
+      ],
+      "source_location": {
+        "file": "main.go",
+        "line": 45,
+        "class": null,
+        "member": "RequestDuration"
+      }
+    },
+    {
+      "name": "http_request_size_bytes",
+      "type": "histogram",
+      "help": "Inbound request body size",
+      "description": "Distribution of inbound request payload sizes in bytes.",
+      "calculation": "Observed in middleware after request body is read.",
+      "labels": [],
+      "source_location": {
+        "file": "main.go",
+        "line": 66,
+        "class": null,
+        "member": "RequestSize"
+      }
+    },
+    {
+      "name": "http_requests_total",
+      "type": "counter",
+      "help": "Total HTTP requests processed",
+      "description": "Total incoming HTTP requests across all endpoints.",
+      "calculation": "Incremented in LoggingMiddleware on each completed request.",
+      "labels": [
+        {
+          "name": "method",
+          "description": "HTTP method: GET, POST, PUT, DELETE"
+        },
+        {
+          "name": "status_code",
+          "description": "HTTP response status code"
+        }
+      ],
+      "source_location": {
+        "file": "main.go",
+        "line": 23,
+        "class": null,
+        "member": "HttpRequestsTotal"
+      }
+    },
+    {
+      "name": "job_attempts_total",
+      "type": "counter",
+      "help": "Total job attempts per outcome",
+      "description": "Total task attempts labelled by outcome.",
+      "calculation": "Incremented in TaskRunner after each attempt resolves.",
+      "labels": [
+        {
+          "name": "outcome",
+          "description": "Either \"success\", \"retry\", or \"failed\""
+        }
+      ],
+      "source_location": {
+        "file": "main.go",
+        "line": 114,
+        "class": null,
+        "member": "JobAttempts"
+      }
+    },
+    {
+      "name": "rpc_operation_latency_seconds",
+      "type": "summary",
+      "help": "Per-operation RPC latency",
+      "description": "Per-operation latency summary across all RPC methods.",
+      "calculation": "Observed in RPC middleware at response time.",
+      "labels": [
+        {
+          "name": "operation",
+          "description": "Name of the RPC method being observed"
+        }
+      ],
+      "source_location": {
+        "file": "main.go",
+        "line": 95,
+        "class": null,
+        "member": "OperationLatency"
+      }
+    },
+    {
+      "name": "tasks_processed_total",
+      "type": "counter",
+      "help": "Total tasks processed",
+      "description": "Total number of tasks completed by the task runner.",
+      "calculation": "Incremented by TaskRunner after successful task completion.",
+      "labels": [],
+      "source_location": {
+        "file": "main.go",
+        "line": 104,
+        "class": null,
+        "member": "TasksProcessed"
+      }
+    },
+    {
+      "name": "worker_queue_depth",
+      "type": "gauge",
+      "help": "Current queue depth per worker",
+      "description": "Current number of items pending in a worker's queue.",
+      "calculation": "Updated by workers on enqueue/dequeue.",
+      "labels": [
+        {
+          "name": "worker_id",
+          "description": "Identifier of the worker whose queue is being measured"
+        }
+      ],
+      "source_location": {
+        "file": "main.go",
+        "line": 76,
+        "class": null,
+        "member": "QueueDepth"
+      }
+    }
+  ]
+}
